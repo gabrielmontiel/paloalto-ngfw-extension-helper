@@ -203,3 +203,13 @@ it's applied.
   via `chrome.storage.onChanged` — the same mechanism `dashboard.js` and
   `options.js` use to refresh their own target dropdown/list without
   needing a manual reload when a target is added elsewhere.
+
+
+  ## Todo:
+  #Remove todo items if they've already been done
+  - Make the app create the report instead of asking for a name of an existing report
+  - Make the report automatically filter by rules that can be optimized (either any in src, dst, app, port)
+
+  #Features
+  - Delete unused objects, take into account objects that are members of other object groups that could be used in a policy
+  - 
