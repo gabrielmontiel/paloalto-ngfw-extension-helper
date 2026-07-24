@@ -24,6 +24,9 @@ const COLUMN_ALIASES = {
   destination: ["destination", "dst", "destinationip", "destination-ip"],
   application: ["application", "app"],
   service: ["service", "port", "dport", "destination-port"],
+  // The single all-traffic report must include a rule column so each row can
+  // be attributed back to the security rule it belongs to.
+  rule: ["rule", "rule-name", "rulename"],
 };
 
 function pick(row, kind) {
@@ -32,6 +35,19 @@ function pick(row, kind) {
     if (aliases.includes(key.toLowerCase())) return row[key];
   }
   return null;
+}
+
+// True if the report rows carry a rule column at all — used to warn when a
+// custom report was built without one (so per-rule attribution is impossible).
+export function hasRuleColumn(rows) {
+  return rows.length > 0 && rows.some((row) => pick(row, "rule") != null);
+}
+
+// Narrows a single all-traffic report down to the rows for one rule, so the
+// same fetched report can be reused across every overly-open rule instead of
+// running one report per rule.
+export function filterRowsByRule(rows, ruleName) {
+  return rows.filter((row) => pick(row, "rule") === ruleName);
 }
 
 function uniqueNonEmpty(values) {
@@ -71,8 +87,15 @@ export function summarizeRows(rows, { appBlacklist = [] } = {}) {
 // Builds the suggested new rule as a plain object (not yet XML), applying
 // the "narrow" or "appid" strategy on top of the original rule's other
 // fields (from/to zones, action, tags — left as-is).
-export function buildSuggestedRule(originalRule, summary, { mode = "narrow", suffix = "-narrowed" } = {}) {
+//
+// `anyFields` (from auditEngine's overlyOpenRules) lists which of
+// source/destination/application/service were "any" on the original rule. In
+// "narrow" mode only those fields are rewritten from observed traffic; fields
+// the admin had already scoped are preserved as-is. When anyFields is omitted
+// (null), every field is eligible — the original all-or-nothing behaviour.
+export function buildSuggestedRule(originalRule, summary, { mode = "narrow", suffix = "-narrowed", anyFields = null } = {}) {
   const newName = `${originalRule.name}${suffix}`;
+  const isOpen = (field) => (anyFields ? anyFields.includes(field) : true);
 
   if (mode === "appid") {
     return {
@@ -88,15 +111,21 @@ export function buildSuggestedRule(originalRule, summary, { mode = "narrow", suf
     };
   }
 
-  // "narrow" mode
+  // "narrow" mode — only rewrite the fields that were "any".
   return {
     name: newName,
     from: originalRule.from,
     to: originalRule.to,
-    source: summary.sources.length ? summary.sources : originalRule.source,
-    destination: summary.destinations.length ? summary.destinations : originalRule.destination,
-    application: summary.applications.length ? summary.applications : originalRule.application,
-    service: summary.applications.length ? ["application-default"] : originalRule.service,
+    source: isOpen("source") && summary.sources.length ? summary.sources : originalRule.source,
+    destination: isOpen("destination") && summary.destinations.length ? summary.destinations : originalRule.destination,
+    application: isOpen("application") && summary.applications.length ? summary.applications : originalRule.application,
+    service: isOpen("service")
+      ? summary.applications.length
+        ? ["application-default"]
+        : summary.services.length
+        ? summary.services
+        : originalRule.service
+      : originalRule.service,
     action: originalRule.action,
     tags: originalRule.tags,
   };

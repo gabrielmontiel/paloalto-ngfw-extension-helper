@@ -11,7 +11,14 @@ import {
   setConfigNode,
 } from "./lib/panApi.js";
 import { runAudit } from "./lib/auditEngine.js";
-import { summarizeRows, buildSuggestedRule, ruleToEntryXml, ruleToSetCommands } from "./lib/policyGenerator.js";
+import {
+  summarizeRows,
+  buildSuggestedRule,
+  ruleToEntryXml,
+  ruleToSetCommands,
+  filterRowsByRule,
+  hasRuleColumn,
+} from "./lib/policyGenerator.js";
 
 const el = (id) => document.getElementById(id);
 
@@ -19,6 +26,7 @@ let lastAuditResult = null;
 let lastTargetLabel = "";
 let lastConfigEl = null; // raw <config> DOM element, for XML export
 let currentTarget = null; // the saved target object last used to fetch
+let allTrafficRows = null; // rows from the single all-traffic report, reused across every rule
 
 // ---------- target dropdown ----------
 
@@ -69,6 +77,7 @@ el("fetchBtn").addEventListener("click", async () => {
   el("fetchBtn").disabled = true;
   setStatus(`Fetching ${source} config from ${target.host}...`);
   el("results").classList.add("hidden");
+  allTrafficRows = null; // a new config/target invalidates the cached traffic report
 
   try {
     const baseUrl = baseUrlFor(target);
@@ -104,7 +113,7 @@ function renderResults(result) {
     ["Unused objects", result.summary.unusedObjectCount],
     ["Possibly shadowed", result.summary.possiblyShadowedCount],
     ["Best-practice findings", result.summary.bestPracticeFindingCount],
-    ["Any/any/any rules", result.summary.overlyOpenRuleCount],
+    ["Overly-open rules", result.summary.overlyOpenRuleCount],
   ];
   el("summaryCards").innerHTML = cards
     .map(([lbl, num]) => `<div class="card"><div class="num">${num}</div><div class="lbl">${lbl}</div></div>`)
@@ -172,209 +181,238 @@ document.getElementById("tabs").addEventListener("click", (e) => {
 function renderOptimizerPanel(result) {
   const panel = el("panel-optimizer");
   if (result.overlyOpenRules.length === 0) {
-    panel.innerHTML = '<div class="empty">No any/any/any/any allow rules found — nothing to optimize.</div>';
+    panel.innerHTML = '<div class="empty">No overly-open allow rules found — nothing to optimize.</div>';
     return;
   }
-  panel.innerHTML =
-    '<div class="optimizer-list">' +
-    result.overlyOpenRules
-      .map(
-        (r, i) => `
-      <div class="optimizer-row">
+
+  panel.innerHTML = `
+    <div class="optimizer-config">
+      <div class="warn-box">
+        Runs <strong>one</strong> ad hoc report over <strong>all</strong> traffic (reusing a saved Custom Report so
+        PAN-OS does the aggregation), then reuses it for every rule below — no per-rule reports. The report must include
+        a <strong>Rule</strong> column and be grouped by rule, plus source, destination, application, and service/port.
+        See the README's "Setting up a Custom Report" section.
+      </div>
+
+      <div class="field-row">
         <div>
-          <strong>${escapeHtml(r.rule.name)}</strong>
-          <div class="meta">${escapeHtml(r.scopeLabel)} — ${escapeHtml(r.rulebaseLabel)}</div>
+          <label>Report container xpath</label>
+          <input id="optReportXpath" value="/config/shared/reports" />
         </div>
-        <div class="actions">
-          <button data-idx="${i}" data-mode="narrow">Narrow using report…</button>
-          <button data-idx="${i}" data-mode="appid">Add App-ID using report…</button>
+        <div>
+          <label>Report name</label>
+          <input id="optReportName" placeholder="e.g. all-traffic-by-rule" />
         </div>
-      </div>`
-      )
-      .join("") +
-    "</div>";
+        <div style="flex:0 0 auto; align-self:flex-end;">
+          <button id="optLoadReports">List available</button>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <div>
+          <label>Period</label>
+          <select id="optPeriod">
+            <option value="last-24-hrs">Last 24 hours</option>
+            <option value="last-7-days" selected>Last 7 days</option>
+            <option value="last-30-days">Last 30 days</option>
+          </select>
+        </div>
+        <div>
+          <label>Top N rows</label>
+          <input id="optTopN" value="500" />
+        </div>
+        <div>
+          <label>App-ID blacklist (space-separated)</label>
+          <input id="optBlacklist" value="insufficient-data unknown-tcp unknown-udp incomplete" />
+        </div>
+      </div>
+
+      <div class="modal-actions" style="justify-content:flex-start;">
+        <button id="optRunReport" class="primary">Run traffic report (all rules)</button>
+      </div>
+      <div id="optReportStatus" class="meta" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="optimizer-list">
+      ${result.overlyOpenRules
+        .map(
+          (r, i) => `
+        <div class="optimizer-row">
+          <div>
+            <strong>${escapeHtml(r.rule.name)}</strong>
+            <div class="meta">${escapeHtml(r.scopeLabel)} — ${escapeHtml(r.rulebaseLabel)} · any in: ${escapeHtml(
+            r.anyFields.join(", ")
+          )}</div>
+          </div>
+          <div class="actions">
+            <button data-idx="${i}" data-mode="narrow" disabled>Narrow…</button>
+            <button data-idx="${i}" data-mode="appid" disabled>Add App-ID…</button>
+          </div>
+        </div>`
+        )
+        .join("")}
+    </div>
+  `;
+
+  el("optLoadReports").addEventListener("click", async () => {
+    const status = el("optReportStatus");
+    status.textContent = "Loading report list...";
+    status.style.color = "";
+    try {
+      const baseUrl = baseUrlFor(currentTarget);
+      const names = await listReportDefinitions(baseUrl, currentTarget.apiKey, el("optReportXpath").value.trim());
+      status.textContent = names.length
+        ? `Found: ${names.join(", ")}`
+        : "No reports found at that xpath. Try /config/shared/reports, or for a per-vsys report on a firewall: /config/devices/entry/vsys/entry[@name='vsys1']/reports";
+    } catch (e) {
+      status.textContent = e.message;
+      status.style.color = "#b41a1a";
+    }
+  });
+
+  el("optRunReport").addEventListener("click", () => runTrafficReport(panel));
 
   panel.querySelectorAll("button[data-mode]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const idx = Number(btn.dataset.idx);
-      openOptimizerModal(result.overlyOpenRules[idx], btn.dataset.mode);
+      generateForRule(result.overlyOpenRules[idx], btn.dataset.mode);
     });
   });
 }
 
-function openOptimizerModal(overlyOpenRule, mode) {
-  const root = el("optimizerModalRoot");
+// Runs the single all-traffic report once and caches its rows. Every rule's
+// Narrow/Add App-ID button then works off this cache — no more one-report-per-rule.
+async function runTrafficReport(panel) {
+  const status = el("optReportStatus");
+  status.style.color = "";
+  const reportName = el("optReportName").value.trim();
+  if (!reportName) {
+    status.textContent = "Enter a report name first.";
+    status.style.color = "#b41a1a";
+    return;
+  }
+  const reportXpath = `${el("optReportXpath").value.trim()}/entry[@name='${reportName}']`;
+  const period = el("optPeriod").value;
+  const topn = el("optTopN").value;
+
+  el("optRunReport").disabled = true;
+  try {
+    const baseUrl = baseUrlFor(currentTarget);
+    status.textContent = "Fetching report definition...";
+    const definitionEntry = await getReportDefinition(baseUrl, currentTarget.apiKey, reportXpath);
+
+    // No (rule eq ...) filter — this pulls all traffic in one job, grouped by
+    // rule via the report definition, so it can be reused for every rule.
+    status.textContent = "Submitting ad hoc report job (all traffic)...";
+    const jobId = await submitAdHocReport(baseUrl, currentTarget.apiKey, definitionEntry, { query: "", period, topn });
+
+    status.textContent = `Job ${jobId} running, polling for results...`;
+    const rows = await pollReportJob(baseUrl, currentTarget.apiKey, jobId);
+    allTrafficRows = rows;
+
+    if (rows.length === 0) {
+      status.textContent = "Report returned no rows for this period. Try a longer period.";
+      return;
+    }
+    if (!hasRuleColumn(rows)) {
+      status.textContent = `Fetched ${rows.length} rows, but no Rule column was found — traffic can't be attributed per rule. Rebuild the Custom Report with a Rule column grouped by rule.`;
+      status.style.color = "#b41a1a";
+      return;
+    }
+
+    status.textContent = `Fetched ${rows.length} traffic rows. Pick a rule below and click Narrow or Add App-ID.`;
+    panel.querySelectorAll("button[data-mode]").forEach((b) => (b.disabled = false));
+  } catch (e) {
+    status.textContent = e.message;
+    status.style.color = "#b41a1a";
+  } finally {
+    el("optRunReport").disabled = false;
+  }
+}
+
+// Builds a suggested rule for one rule from the cached all-traffic report and
+// shows it (SET commands + push) in the modal. No network report call here.
+function generateForRule(overlyOpenRule, mode) {
+  if (!allTrafficRows) return;
   const isAppid = mode === "appid";
-  const defaultSuffix = isAppid ? "-appid" : "-narrowed";
+  const suffix = isAppid ? "-appid" : "-narrowed";
+  const blacklist = el("optBlacklist").value.trim().split(/\s+/).filter(Boolean);
+
+  const root = el("optimizerModalRoot");
+  const out = () => el("optOutput");
+
+  const ruleRows = filterRowsByRule(allTrafficRows, overlyOpenRule.rule.name);
 
   root.innerHTML = `
     <div class="modal-backdrop">
       <div class="modal modal-wrap">
         <button class="close-x" id="modalClose">✕</button>
         <h2>${isAppid ? "Add App-ID" : "Narrow policy"}: ${escapeHtml(overlyOpenRule.rule.name)}</h2>
-        <div class="subtitle">${escapeHtml(overlyOpenRule.scopeLabel)} — ${escapeHtml(overlyOpenRule.rulebaseLabel)}</div>
-
-        <div class="warn-box">
-          This reuses a <strong>saved Custom Report</strong> (Monitor &gt; Manage Custom Reports on the firewall/Panorama)
-          so PAN-OS does the aggregation, not raw log parsing. It needs source, destination, application, and service/port
-          columns to be useful. See the README's "Setting up a Custom Report" section if you haven't made one yet.
-        </div>
-
-        <div class="field-row">
-          <div>
-            <label>Report container xpath</label>
-            <input id="optReportXpath" value="/config/shared/reports" />
-          </div>
-          <div>
-            <label>Report name</label>
-            <input id="optReportName" placeholder="e.g. rule-traffic-breakdown" />
-          </div>
-          <div style="flex:0 0 auto; align-self:flex-end;">
-            <button id="optLoadReports">List available</button>
-          </div>
-        </div>
-
-        <div class="field-row">
-          <div>
-            <label>Period</label>
-            <select id="optPeriod">
-              <option value="last-24-hrs">Last 24 hours</option>
-              <option value="last-7-days" selected>Last 7 days</option>
-              <option value="last-30-days">Last 30 days</option>
-            </select>
-          </div>
-          <div>
-            <label>Top N rows</label>
-            <input id="optTopN" value="200" />
-          </div>
-          <div>
-            <label>New rule suffix</label>
-            <input id="optSuffix" value="${defaultSuffix}" />
-          </div>
-        </div>
-
-        <div class="field-row">
-          <div>
-            <label>App-ID blacklist (space-separated)</label>
-            <input id="optBlacklist" value="insufficient-data unknown-tcp unknown-udp incomplete" />
-          </div>
-        </div>
-
-        <div class="modal-actions">
-          <button id="optRun" class="primary">Run report &amp; generate</button>
-        </div>
-
+        <div class="subtitle">${escapeHtml(overlyOpenRule.scopeLabel)} — ${escapeHtml(
+    overlyOpenRule.rulebaseLabel
+  )} · any in: ${escapeHtml(overlyOpenRule.anyFields.join(", "))}</div>
         <div id="optOutput"></div>
       </div>
     </div>
   `;
-
   el("modalClose").addEventListener("click", () => (root.innerHTML = ""));
   root.querySelector(".modal-backdrop").addEventListener("click", (e) => {
     if (e.target.classList.contains("modal-backdrop")) root.innerHTML = "";
   });
 
-  el("optLoadReports").addEventListener("click", async () => {
-    const out = el("optOutput");
-    out.innerHTML = '<p class="meta">Loading report list...</p>';
-    try {
-      const baseUrl = baseUrlFor(currentTarget);
-      const names = await listReportDefinitions(baseUrl, currentTarget.apiKey, el("optReportXpath").value.trim());
-      out.innerHTML = names.length
-        ? `<p class="meta">Found: ${names.map(escapeHtml).join(", ")}</p>`
-        : '<p class="meta">No reports found at that xpath. Try /config/shared/reports, or for a per-vsys report on a firewall: /config/devices/entry/vsys/entry[@name=\'vsys1\']/reports</p>';
-    } catch (e) {
-      out.innerHTML = `<p class="meta" style="color:#b41a1a;">${escapeHtml(e.message)}</p>`;
-    }
-  });
-
-  el("optRun").addEventListener("click", () => runOptimizer(overlyOpenRule, mode));
-}
-
-async function runOptimizer(overlyOpenRule, mode) {
-  const out = el("optOutput");
-  const reportXpath = `${el("optReportXpath").value.trim()}/entry[@name='${el("optReportName").value.trim()}']`;
-  const period = el("optPeriod").value;
-  const topn = el("optTopN").value;
-  const suffix = el("optSuffix").value.trim() || "-narrowed";
-  const blacklist = el("optBlacklist").value.trim().split(/\s+/).filter(Boolean);
-
-  if (!el("optReportName").value.trim()) {
-    out.innerHTML = '<p class="meta" style="color:#b41a1a;">Enter a report name first.</p>';
+  if (ruleRows.length === 0) {
+    out().innerHTML =
+      '<p class="meta">No traffic rows for this rule in the report. It may have had no traffic in the selected period, or the report\'s Rule column names don\'t match this rule.</p>';
     return;
   }
 
-  out.innerHTML = '<p class="meta">Fetching report definition...</p>';
-  try {
-    const baseUrl = baseUrlFor(currentTarget);
-    const definitionEntry = await getReportDefinition(baseUrl, currentTarget.apiKey, reportXpath);
+  const summary = summarizeRows(ruleRows, { appBlacklist: blacklist });
+  const suggested = buildSuggestedRule(overlyOpenRule.rule, summary, { mode, suffix, anyFields: overlyOpenRule.anyFields });
+  const entryXml = ruleToEntryXml(suggested);
+  const setCommands = ruleToSetCommands(suggested, {
+    deviceEntryName: overlyOpenRule.deviceEntryName,
+    scopeKind: overlyOpenRule.scopeKind,
+    scopeName: overlyOpenRule.scopeName,
+    rulebaseTag: overlyOpenRule.rulebaseTag,
+  });
 
-    let query = `(rule eq '${overlyOpenRule.rule.name}')`;
-    if (overlyOpenRule.scopeKind === "device-group") {
-      query += ` and (device-group eq '${overlyOpenRule.scopeName}')`;
-    }
+  out().innerHTML = `
+    <p class="meta">${ruleRows.length} traffic rows for this rule. Suggested rule: <strong>${escapeHtml(
+    suggested.name
+  )}</strong></p>
+    <table class="summary-table">
+      <tr><th>Sources observed</th><td>${summary.sources.length}</td></tr>
+      <tr><th>Destinations observed</th><td>${summary.destinations.length}</td></tr>
+      <tr><th>Applications observed</th><td>${escapeHtml(summary.applications.join(", ")) || "none (after blacklist)"}</td></tr>
+    </table>
+    <label>SET commands</label>
+    <textarea class="code" rows="8" readonly>${escapeHtml(setCommands)}</textarea>
+    <div class="modal-actions">
+      <button id="optCopy">Copy SET commands</button>
+      <button id="optDownload">Download .txt</button>
+      <button id="optPush" class="primary">Push new rule to candidate config</button>
+    </div>
+    <div id="optPushStatus" class="meta" style="margin-top:8px;"></div>
+  `;
 
-    out.innerHTML = '<p class="meta">Submitting ad hoc report job...</p>';
-    const jobId = await submitAdHocReport(baseUrl, currentTarget.apiKey, definitionEntry, { query, period, topn });
-
-    out.innerHTML = `<p class="meta">Job ${escapeHtml(jobId)} running, polling for results...</p>`;
-    const rows = await pollReportJob(baseUrl, currentTarget.apiKey, jobId);
-
-    if (rows.length === 0) {
-      out.innerHTML = '<p class="meta">Report returned no rows for this rule/period — nothing to suggest. Try a longer period.</p>';
-      return;
-    }
-
-    const summary = summarizeRows(rows, { appBlacklist: blacklist });
-    const suggested = buildSuggestedRule(overlyOpenRule.rule, summary, { mode, suffix });
-    const entryXml = ruleToEntryXml(suggested);
-    const setCommands = ruleToSetCommands(suggested, {
-      deviceEntryName: overlyOpenRule.deviceEntryName,
-      scopeKind: overlyOpenRule.scopeKind,
-      scopeName: overlyOpenRule.scopeName,
-      rulebaseTag: overlyOpenRule.rulebaseTag,
-    });
-
-    out.innerHTML = `
-      <p class="meta">${rows.length} traffic rows analyzed. Suggested rule: <strong>${escapeHtml(suggested.name)}</strong></p>
-      <table class="summary-table">
-        <tr><th>Sources observed</th><td>${summary.sources.length}</td></tr>
-        <tr><th>Destinations observed</th><td>${summary.destinations.length}</td></tr>
-        <tr><th>Applications observed</th><td>${escapeHtml(summary.applications.join(", ")) || "none (after blacklist)"}</td></tr>
-      </table>
-      <label>SET commands</label>
-      <textarea class="code" rows="8" readonly>${escapeHtml(setCommands)}</textarea>
-      <div class="modal-actions">
-        <button id="optCopy">Copy SET commands</button>
-        <button id="optDownload">Download .txt</button>
-        <button id="optPush" class="primary">Push new rule to candidate config</button>
-      </div>
-      <div id="optPushStatus" class="meta" style="margin-top:8px;"></div>
-    `;
-
-    el("optCopy").addEventListener("click", () => navigator.clipboard.writeText(setCommands));
-    el("optDownload").addEventListener("click", () =>
-      downloadFile(`${suggested.name}.txt`, setCommands, "text/plain")
+  el("optCopy").addEventListener("click", () => navigator.clipboard.writeText(setCommands));
+  el("optDownload").addEventListener("click", () => downloadFile(`${suggested.name}.txt`, setCommands, "text/plain"));
+  el("optPush").addEventListener("click", async () => {
+    const confirmed = confirm(
+      `This adds a NEW rule "${suggested.name}" to the CANDIDATE config (not committed, not running). ` +
+        `You'll still need to review and commit it yourself. Continue?`
     );
-    el("optPush").addEventListener("click", async () => {
-      const confirmed = confirm(
-        `This adds a NEW rule "${suggested.name}" to the CANDIDATE config (not committed, not running). ` +
-          `You'll still need to review and commit it yourself. Continue?`
-      );
-      if (!confirmed) return;
-      const status = el("optPushStatus");
-      status.textContent = "Pushing...";
-      try {
-        await setConfigNode(baseUrlFor(currentTarget), currentTarget.apiKey, overlyOpenRule.containerXpath, entryXml);
-        status.textContent = `Done — "${suggested.name}" is now in the candidate config. Review and commit from the firewall/Panorama when ready.`;
-      } catch (e) {
-        status.textContent = `Failed: ${e.message}`;
-        status.style.color = "#b41a1a";
-      }
-    });
-  } catch (e) {
-    out.innerHTML = `<p class="meta" style="color:#b41a1a;">${escapeHtml(e.message)}</p>`;
-  }
+    if (!confirmed) return;
+    const status = el("optPushStatus");
+    status.textContent = "Pushing...";
+    try {
+      await setConfigNode(baseUrlFor(currentTarget), currentTarget.apiKey, overlyOpenRule.containerXpath, entryXml);
+      status.textContent = `Done — "${suggested.name}" is now in the candidate config. Review and commit from the firewall/Panorama when ready.`;
+    } catch (e) {
+      status.textContent = `Failed: ${e.message}`;
+      status.style.color = "#b41a1a";
+    }
+  });
 }
 
 // ---------- exports ----------
