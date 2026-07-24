@@ -4,9 +4,8 @@ import {
   baseUrlFor,
   getRunningConfig,
   getCandidateConfig,
-  listReportDefinitions,
-  getReportDefinition,
-  submitAdHocReport,
+  trafficSummaryReportTypeXml,
+  submitAdHocReportFromType,
   pollReportJob,
   setConfigNode,
 } from "./lib/panApi.js";
@@ -188,24 +187,9 @@ function renderOptimizerPanel(result) {
   panel.innerHTML = `
     <div class="optimizer-config">
       <div class="warn-box">
-        Runs <strong>one</strong> ad hoc report over <strong>all</strong> traffic (reusing a saved Custom Report so
-        PAN-OS does the aggregation), then reuses it for every rule below — no per-rule reports. The report must include
-        a <strong>Rule</strong> column and be grouped by rule, plus source, destination, application, and service/port.
-        See the README's "Setting up a Custom Report" section.
-      </div>
-
-      <div class="field-row">
-        <div>
-          <label>Report container xpath</label>
-          <input id="optReportXpath" value="/config/shared/reports" />
-        </div>
-        <div>
-          <label>Report name</label>
-          <input id="optReportName" placeholder="e.g. all-traffic-by-rule" />
-        </div>
-        <div style="flex:0 0 auto; align-self:flex-end;">
-          <button id="optLoadReports">List available</button>
-        </div>
+        The extension <strong>builds and runs the report itself</strong> — no need to pre-create or name a Custom
+        Report. It submits <strong>one</strong> ad hoc traffic-summary report (grouped by rule) scoped to just the
+        ${result.overlyOpenRules.length} optimizable rule(s) below, then reuses it for every rule — no per-rule reports.
       </div>
 
       <div class="field-row">
@@ -228,7 +212,7 @@ function renderOptimizerPanel(result) {
       </div>
 
       <div class="modal-actions" style="justify-content:flex-start;">
-        <button id="optRunReport" class="primary">Run traffic report (all rules)</button>
+        <button id="optRunReport" class="primary">Run traffic report (optimizable rules)</button>
       </div>
       <div id="optReportStatus" class="meta" style="margin-top:8px;"></div>
     </div>
@@ -254,23 +238,7 @@ function renderOptimizerPanel(result) {
     </div>
   `;
 
-  el("optLoadReports").addEventListener("click", async () => {
-    const status = el("optReportStatus");
-    status.textContent = "Loading report list...";
-    status.style.color = "";
-    try {
-      const baseUrl = baseUrlFor(currentTarget);
-      const names = await listReportDefinitions(baseUrl, currentTarget.apiKey, el("optReportXpath").value.trim());
-      status.textContent = names.length
-        ? `Found: ${names.join(", ")}`
-        : "No reports found at that xpath. Try /config/shared/reports, or for a per-vsys report on a firewall: /config/devices/entry/vsys/entry[@name='vsys1']/reports";
-    } catch (e) {
-      status.textContent = e.message;
-      status.style.color = "#b41a1a";
-    }
-  });
-
-  el("optRunReport").addEventListener("click", () => runTrafficReport(panel));
+  el("optRunReport").addEventListener("click", () => runTrafficReport(panel, result.overlyOpenRules));
 
   panel.querySelectorAll("button[data-mode]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -280,42 +248,47 @@ function renderOptimizerPanel(result) {
   });
 }
 
-// Runs the single all-traffic report once and caches its rows. Every rule's
-// Narrow/Add App-ID button then works off this cache — no more one-report-per-rule.
-async function runTrafficReport(panel) {
+// Builds a PAN-OS traffic query that matches only the optimizable rules, so the
+// single report PAN-OS runs is already filtered to the rules we care about.
+// (Rule names with a single quote can't be expressed in PAN-OS query syntax, so
+// they're skipped — rare, and only means those rules won't be pre-filtered.)
+function optimizableRulesQuery(overlyOpenRules) {
+  const names = Array.from(new Set(overlyOpenRules.map((r) => r.rule.name))).filter((n) => !n.includes("'"));
+  return names.map((n) => `(rule eq '${n}')`).join(" or ");
+}
+
+// Builds the report itself and runs it once, filtered to the optimizable rules,
+// then caches the rows. Every rule's Narrow/Add App-ID button works off this
+// cache — no saved report needed and no per-rule reports.
+async function runTrafficReport(panel, overlyOpenRules) {
   const status = el("optReportStatus");
   status.style.color = "";
-  const reportName = el("optReportName").value.trim();
-  if (!reportName) {
-    status.textContent = "Enter a report name first.";
-    status.style.color = "#b41a1a";
-    return;
-  }
-  const reportXpath = `${el("optReportXpath").value.trim()}/entry[@name='${reportName}']`;
   const period = el("optPeriod").value;
   const topn = el("optTopN").value;
+  const query = optimizableRulesQuery(overlyOpenRules);
 
   el("optRunReport").disabled = true;
   try {
     const baseUrl = baseUrlFor(currentTarget);
-    status.textContent = "Fetching report definition...";
-    const definitionEntry = await getReportDefinition(baseUrl, currentTarget.apiKey, reportXpath);
-
-    // No (rule eq ...) filter — this pulls all traffic in one job, grouped by
-    // rule via the report definition, so it can be reused for every rule.
-    status.textContent = "Submitting ad hoc report job (all traffic)...";
-    const jobId = await submitAdHocReport(baseUrl, currentTarget.apiKey, definitionEntry, { query: "", period, topn });
+    // App-built traffic-summary report (grouped by rule), filtered to the
+    // optimizable rules — no pre-built/named Custom Report required.
+    status.textContent = "Submitting ad hoc report job (optimizable rules)...";
+    const jobId = await submitAdHocReportFromType(baseUrl, currentTarget.apiKey, trafficSummaryReportTypeXml(), {
+      query,
+      period,
+      topn,
+    });
 
     status.textContent = `Job ${jobId} running, polling for results...`;
     const rows = await pollReportJob(baseUrl, currentTarget.apiKey, jobId);
     allTrafficRows = rows;
 
     if (rows.length === 0) {
-      status.textContent = "Report returned no rows for this period. Try a longer period.";
+      status.textContent = "Report returned no rows for these rules/period. Try a longer period.";
       return;
     }
     if (!hasRuleColumn(rows)) {
-      status.textContent = `Fetched ${rows.length} rows, but no Rule column was found — traffic can't be attributed per rule. Rebuild the Custom Report with a Rule column grouped by rule.`;
+      status.textContent = `Fetched ${rows.length} rows, but no rule column was found in the result — can't attribute traffic per rule on this PAN-OS version.`;
       status.style.color = "#b41a1a";
       return;
     }
