@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>PAN-OS Config Auditor — Dashboard</title>
+  <link rel="stylesheet" href="nav.css" />
+  <link rel="stylesheet" href="dashboard.css" />
+</head>
+<body>
+  <div id="navbar-root"></div>
+
+  <header>
+    <div class="controls">
+      <select id="targetSelect"></select>
+      <select id="configSourceSelect" title="Running = active/effective config. Candidate = staged, uncommitted edits.">
+        <option value="running">Running config</option>
+        <option value="candidate">Candidate config</option>
+      </select>
+      <button id="fetchBtn" class="primary">Fetch &amp; Audit</button>
+      <button id="exportJsonBtn" disabled>Export Findings (JSON)</button>
+      <button id="exportCsvBtn" disabled>Export Findings (CSV)</button>
+      <button id="exportXmlBtn" disabled>Export Raw XML</button>
+    </div>
+  </header>
+
+  <div id="statusBar" class="status-bar"></div>
+
+  <main id="results" class="hidden">
+    <section class="summary-cards" id="summaryCards"></section>
+
+    <nav class="tabs" id="tabs">
+      <button data-tab="disabled" class="tab active">Disabled Rules</button>
+      <button data-tab="unused" class="tab">Unused Objects</button>
+      <button data-tab="shadowed" class="tab">Possibly Shadowed</button>
+      <button data-tab="bestpractice" class="tab">Best Practice</button>
+      <button data-tab="optimizer" class="tab">Policy Optimizer</button>
+    </nav>
+
+    <section id="panel-disabled" class="panel"></section>
+    <section id="panel-unused" class="panel hidden"></section>
+    <section id="panel-shadowed" class="panel hidden"></section>
+    <section id="panel-bestpractice" class="panel hidden"></section>
+    <section id="panel-optimizer" class="panel hidden"></section>
+  </main>
+
+  <div id="optimizerModalRoot"></div>
+
+  <script src="lib/navbar.js" type="module"></script>
+  <script src="dashboard.js" type="module"></script>
+</body>
+</html>

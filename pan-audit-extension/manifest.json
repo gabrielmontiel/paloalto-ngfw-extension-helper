@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "PAN-OS Config Auditor",
+  "version": "0.1.0",
+  "description": "Fetches PAN-OS / Panorama running-config over the XML API and audits it for unused objects, disabled/shadowed rules, and best-practice gaps.",
+  "options_page": "options.html",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "PAN-OS Config Auditor"
+  },
+  "permissions": ["storage"],
+  "optional_host_permissions": ["https://*/*"]
+}

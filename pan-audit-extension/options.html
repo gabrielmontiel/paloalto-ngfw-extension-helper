@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>PAN-OS Config Auditor — Connections</title>
+  <link rel="stylesheet" href="nav.css" />
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; color: #1a1a1a; background: #f6f7f9; }
+    .page { max-width: 640px; margin: 32px auto; padding: 0 16px; }
+    h1 { font-size: 18px; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+    label { display: block; font-size: 12px; color: #555; margin: 10px 0 4px; }
+    input { width: 100%; padding: 7px 9px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; box-sizing: border-box; }
+    .row { display: flex; gap: 10px; }
+    .row > div { flex: 1; }
+    button { padding: 8px 14px; border-radius: 6px; border: 1px solid #1a5fb4; background: #1a5fb4; color: white; cursor: pointer; font-size: 13px; margin-top: 14px; }
+    button:hover { background: #164e94; }
+    button.secondary { background: white; color: #b41a1a; border-color: #b41a1a; }
+    button.secondary:hover { background: #fdf0f0; }
+    .target { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #eee; padding: 10px 0; }
+    .target:last-child { border-bottom: none; }
+    .target .meta { font-size: 12px; color: #666; }
+    .status { font-size: 12px; margin-top: 8px; }
+    .status.error { color: #b41a1a; }
+    .status.ok { color: #1a7d3a; }
+    .note { font-size: 12px; color: #666; background: #f7f7f7; border-radius: 8px; padding: 10px 12px; margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <div id="navbar-root"></div>
+  <div class="page">
+  <h1>Connections</h1>
+  <div class="note">
+    Self-signed certs: before connecting here, visit <code>https://&lt;host&gt;</code> in a normal tab once
+    and accept the browser's certificate warning — otherwise the request below will fail silently.
+    Passwords are used once to call PAN-OS's <code>type=keygen</code> and are never stored; only the
+    resulting API key is saved.
+  </div>
+
+  <div class="card">
+    <h2 style="font-size:14px;margin:0 0 4px;">Add a firewall or Panorama</h2>
+    <label for="label">Label (anything, e.g. "HQ Edge FW")</label>
+    <input id="label" placeholder="HQ Edge FW" />
+    <div class="row">
+      <div>
+        <label for="host">Hostname or IP</label>
+        <input id="host" placeholder="10.0.0.1 or panorama.company.com" />
+      </div>
+      <div style="max-width:100px;">
+        <label for="port">Port</label>
+        <input id="port" placeholder="443" value="443" />
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="username">Username</label>
+        <input id="username" autocomplete="off" />
+      </div>
+      <div>
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="off" />
+      </div>
+    </div>
+    <button id="connectBtn">Connect &amp; Save</button>
+    <div id="status" class="status"></div>
+  </div>
+
+  <div class="card">
+    <h2 style="font-size:14px;margin:0 0 4px;">Saved targets</h2>
+    <div id="targetList"></div>
+  </div>
+  </div>
+
+  <script src="lib/navbar.js" type="module"></script>
+  <script src="options.js" type="module"></script>
+</body>
+</html>

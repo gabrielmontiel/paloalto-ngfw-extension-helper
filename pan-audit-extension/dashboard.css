@@ -1,0 +1,93 @@
+* { box-sizing: border-box; }
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  margin: 0; background: #f6f7f9; color: #1a1a1a;
+}
+header {
+  background: white; border-bottom: 1px solid #e2e2e2; padding: 14px 24px;
+  display: flex; align-items: center; justify-content: flex-start; flex-wrap: wrap; gap: 10px;
+}
+.controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+select, button {
+  font-size: 13px; padding: 7px 10px; border-radius: 6px; border: 1px solid #ccc; background: white; cursor: pointer;
+}
+button.primary { background: #1a5fb4; border-color: #1a5fb4; color: white; }
+button.primary:hover { background: #164e94; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+.status-bar { padding: 10px 24px; font-size: 13px; color: #555; }
+.status-bar.error { color: #b41a1a; }
+
+main { padding: 20px 24px 60px; }
+.hidden { display: none !important; }
+
+.summary-cards {
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 20px;
+}
+.card {
+  background: white; border: 1px solid #e2e2e2; border-radius: 10px; padding: 14px;
+}
+.card .num { font-size: 24px; font-weight: 700; }
+.card .lbl { font-size: 12px; color: #666; margin-top: 4px; }
+
+.tabs { display: flex; gap: 6px; margin-bottom: 14px; border-bottom: 1px solid #e2e2e2; }
+.tab {
+  border: none; background: none; padding: 10px 14px; font-size: 13px; cursor: pointer;
+  border-bottom: 2px solid transparent; color: #555;
+}
+.tab.active { color: #1a5fb4; border-bottom-color: #1a5fb4; font-weight: 600; }
+
+.panel { background: white; border: 1px solid #e2e2e2; border-radius: 10px; padding: 4px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid #f0f0f0; }
+th { color: #555; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.02em; }
+tr:last-child td { border-bottom: none; }
+.empty { padding: 24px; text-align: center; color: #888; font-size: 13px; }
+
+.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.badge.high { background: #fde3e3; color: #b41a1a; }
+.badge.medium { background: #fdefe0; color: #b4701a; }
+.badge.low { background: #eaf1fc; color: #1a5fb4; }
+.badge.info { background: #eee; color: #555; }
+
+/* ---------- Policy Optimizer ---------- */
+.optimizer-list { padding: 4px; }
+.optimizer-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px; border-bottom: 1px solid #f0f0f0;
+}
+.optimizer-row:last-child { border-bottom: none; }
+.optimizer-row .meta { font-size: 12px; color: #666; margin-top: 2px; }
+.optimizer-row .actions { display: flex; gap: 8px; }
+.optimizer-row .actions button { font-size: 12px; padding: 6px 10px; }
+
+/* ---------- Modal ---------- */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 40px 20px; overflow-y: auto; z-index: 1000;
+}
+.modal {
+  background: white; border-radius: 12px; padding: 22px; max-width: 760px; width: 100%;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+}
+.modal h2 { font-size: 15px; margin: 0 0 4px; }
+.modal .subtitle { font-size: 12px; color: #666; margin-bottom: 16px; }
+.modal .field-row { display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.modal .field-row > div { flex: 1; min-width: 160px; }
+.modal label { display: block; font-size: 11px; color: #555; margin-bottom: 3px; }
+.modal input, .modal select, .modal textarea {
+  width: 100%; padding: 6px 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 12px; box-sizing: border-box;
+  font-family: inherit;
+}
+.modal textarea.code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px; }
+.modal .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; flex-wrap: wrap; }
+.modal .close-x {
+  position: absolute; top: 14px; right: 18px; border: none; background: none; font-size: 16px; cursor: pointer; color: #888;
+}
+.modal-wrap { position: relative; }
+.summary-table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 10px 0; }
+.summary-table th, .summary-table td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #f0f0f0; }
+.warn-box {
+  background: #fdefe0; border: 1px solid #f3d8ad; color: #7a4a00; border-radius: 8px;
+  padding: 10px 12px; font-size: 12px; margin-bottom: 14px;
+}
