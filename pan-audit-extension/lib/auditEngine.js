@@ -257,8 +257,8 @@ export function runAudit(configEl) {
             disabledRules.push({ scope: scope.label, rulebase: rb.label, name: rule.name });
           }
 
-          const isOverlyOpen = runBestPracticeChecks(rule, scope, rb, bestPractice);
-          if (isOverlyOpen) {
+          const anyFields = runBestPracticeChecks(rule, scope, rb, bestPractice);
+          if (anyFields.length) {
             overlyOpenRules.push({
               scopeLabel: scope.label,
               scopeKind: rbScope.kind,
@@ -267,6 +267,7 @@ export function runAudit(configEl) {
               rulebaseLabel: rb.label,
               containerXpath,
               deviceEntryName,
+              anyFields, // which of source/destination/application/service are "any"
               rule,
             });
           }
@@ -356,25 +357,27 @@ function resolveAndMark(name, kind, chain, objectsByScope, usedSet, visiting) {
   // typo; nothing to mark as used, and we don't flag predefined objects.
 }
 
-// Returns true if the rule is flagged as any/any/any/any (used by the
-// caller to also populate overlyOpenRules for the Policy Optimizer).
+// Returns the list of match fields (subset of source/destination/application/
+// service) that are set to "any" on an allow rule — empty if the rule isn't a
+// candidate for optimization. The Policy Optimizer treats a rule as "overly
+// open" when ANY one of these fields is "any" (OR), not only when all four are
+// (AND) — a single unrestricted field is already worth narrowing.
 function runBestPracticeChecks(rule, scope, rb, findings) {
-  if (rule.disabled) return false; // don't pile on disabled rules
+  if (rule.disabled) return []; // don't pile on disabled rules
 
   const isAny = (arr) => arr.length === 1 && arr[0] === "any";
-  const overlyOpen =
-    rule.action === "allow" &&
-    isAny(rule.source) &&
-    isAny(rule.destination) &&
-    isAny(rule.application) &&
-    isAny(rule.service);
+  const anyFields = ["source", "destination", "application", "service"].filter((f) => isAny(rule[f]));
+  const overlyOpen = rule.action === "allow" && anyFields.length > 0;
   if (overlyOpen) {
+    const allFour = anyFields.length === 4;
     findings.push({
       scope: scope.label,
       rulebase: rb.label,
       rule: rule.name,
-      issue: "Allow rule with any/any/any/any (source, destination, application, service).",
-      severity: "high",
+      issue: allFour
+        ? 'Allow rule with any/any/any/any (source, destination, application, service).'
+        : `Allow rule with "any" in: ${anyFields.join(", ")}.`,
+      severity: allFour ? "high" : "medium",
     });
   }
 
@@ -408,7 +411,7 @@ function runBestPracticeChecks(rule, scope, rb, findings) {
     });
   }
 
-  return overlyOpen;
+  return overlyOpen ? anyFields : [];
 }
 
 // Heuristic shadow check: within the same ordered rulebase, does an

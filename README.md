@@ -4,12 +4,14 @@ Fetches config from a Palo Alto firewall or Panorama over the PAN-OS XML
 API and:
 
 - **Audits** it for disabled rules, unused address/service objects,
-  possibly-shadowed rules, and best-practice gaps (any/any/any/any rules,
+  possibly-shadowed rules, and best-practice gaps (overly-open rules,
   missing profiles, logging disabled, untagged rules).
-- **Optimizes** any/any/any/any rules: pulls a PAN-OS Custom Report scoped
-  to that rule, and generates either a narrower replacement rule or an
-  app-id backfill, as SET commands and/or a direct push to the *candidate*
-  config for you to review and commit.
+- **Optimizes** overly-open rules — any allow rule with `any` in **one or
+  more** of source, destination, application, or service (an OR, not only the
+  all-four any/any/any/any case). It pulls **one** PAN-OS Custom Report
+  covering all traffic and reuses it for every rule, generating either a
+  narrower replacement rule or an app-id backfill, as SET commands and/or a
+  direct push to the *candidate* config for you to review and commit.
 
 Everything runs client-side in the extension. Nothing is sent anywhere
 except the firewall/Panorama you point it at.
@@ -74,42 +76,66 @@ runtime — it can't be pre-baked for arbitrary customer firewalls).
 
 ## Policy Optimizer
 
-For each any/any/any/any rule found, two actions are available:
+A rule is flagged as **overly open** when it's an allow rule with `any` in
+**one or more** of source, destination, application, or service — a single
+unrestricted field is already worth narrowing, so this is an OR, not only the
+all-four any/any/any/any case. The Optimizer panel lists every such rule and
+shows which fields are `any`.
 
-- **Narrow using report** — rewrites source, destination, application, and
-  service to only what was actually observed for that rule.
+You run **one** traffic report for the whole firewall (see below) and then,
+for each rule, two actions are available:
+
+- **Narrow using report** — rewrites only the fields that were `any` to what
+  was actually observed for that rule; fields you'd already scoped are left
+  untouched.
 - **Add App-ID using report** — leaves source/destination alone, adds the
   observed applications, and switches service to `application-default`.
 
 Both generate a new rule named `<original>-narrowed` or `<original>-appid`
 (configurable suffix) rather than editing the original in place, so the old
-any/any/any/any rule stays until you're confident enough to disable or
-remove it — the same approach as the two GUI tools this was ported from.
+rule stays until you're confident enough to disable or remove it — the same
+approach as the two GUI tools this was ported from.
+
+### One report for the whole firewall
+
+Rather than pulling a separate report per rule, the Optimizer runs a **single**
+ad hoc report covering **all** traffic and reuses it for every rule. In the
+Optimizer panel:
+
+1. Enter the report container xpath and report name, pick a period/Top N, then
+   click **Run traffic report (all rules)** — once.
+2. The extension caches the returned rows and enables the **Narrow** / **Add
+   App-ID** buttons on every listed rule.
+3. Each button filters the cached rows down to that rule (by the report's
+   **Rule** column) — no additional report jobs are submitted.
 
 ### Setting up a Custom Report (one-time, per firewall/Panorama)
 
 The Optimizer deliberately does **not** guess at PAN-OS's internal summary
 database schema — instead it re-runs a report you build once in the GUI, ad
-hoc, scoped to one rule. To set one up:
+hoc, over all traffic (grouped by rule). To set one up:
 
 1. On the firewall (or Panorama, if reporting on Panorama-visible logs):
    **Monitor → Manage Custom Reports → Add**.
 2. Database: **Traffic Log** (or Traffic Summary, depending on version).
-3. Columns to include: at minimum **Source Address**, **Destination
-   Address**, **Application**, **Service/Port** — these are what the
-   Optimizer looks for (it matches column names case-insensitively against
-   a few common aliases; see `lib/policyGenerator.js`).
-4. Group by / sort however you like — the Optimizer just needs the rows.
-5. Save it with a name you'll remember (e.g. `rule-traffic-breakdown`).
-6. In the extension's Optimizer modal, enter that name and click
+3. Columns to include: at minimum **Rule**, **Source Address**, **Destination
+   Address**, **Application**, **Service/Port** — these are what the Optimizer
+   looks for (it matches column names case-insensitively against a few common
+   aliases; see `lib/policyGenerator.js`). The **Rule** column is required: the
+   single all-traffic report is attributed back to each rule by rule name.
+4. **Group by Rule** (and sort however else you like) so every rule appears in
+   the one report — this is what lets a single report cover all rules.
+5. Save it with a name you'll remember (e.g. `all-traffic-by-rule`).
+6. In the extension's Optimizer panel, enter that name and click
    **List available** to confirm the container xpath is right (defaults to
    `/config/shared/reports`; for a per-vsys report on a firewall use
    `/config/devices/entry/vsys/entry[@name='vsys1']/reports` instead).
 
-The Optimizer then re-runs that exact report definition ad hoc, adding a
-`query` filter of `(rule eq '<rule name>')` (plus `(device-group eq
-'<dg>')` on Panorama) and your chosen time period — so you get PAN-OS's own
-pre-aggregated numbers, fast, without pulling raw logs.
+The Optimizer then re-runs that exact report definition ad hoc **once**, with
+no `(rule eq ...)` filter (so it covers all traffic) and your chosen time
+period — so you get PAN-OS's own pre-aggregated numbers, fast, without pulling
+raw logs. Per-rule attribution is done client-side from the **Rule** column,
+so the same report is reused for every rule instead of one report per rule.
 
 ### Pushing changes
 
@@ -120,7 +146,7 @@ against the exact rulebase xpath the audit found the original rule in. It:
   auto-committed. You still commit yourself, from the firewall/Panorama, on
   your own schedule.
 - Only **adds** the new suffixed rule — it never touches or deletes the
-  original any/any/any/any rule.
+  original overly-open rule.
 - Asks for an explicit confirmation before pushing.
 
 If you'd rather not push via the API at all, copy the generated SET
@@ -145,9 +171,13 @@ it's applied.
   action). Treat every "possibly shadowed" result as a lead to check
   manually, not a verdict.
 - The Policy Optimizer's report-column matching assumes reasonably standard
-  column names (source/destination/application/service). If your report
+  column names (rule/source/destination/application/service). If your report
   uses very different naming, adjust `COLUMN_ALIASES` in
   `lib/policyGenerator.js`.
+- The single all-traffic report is attributed back to rules by **rule name**.
+  On Panorama, if the same rule name exists in more than one device-group,
+  those rows can't be told apart from the report alone — narrow such rules
+  with care, or add a device-group column and extend the matching.
 - There's no CSV-import fallback in this version (the two GUI tools this
   was ported from supported loading a Traffic Report CSV directly) — the
   live report pull was prioritized since PAN-OS's own summarization is
