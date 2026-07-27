@@ -1,51 +1,271 @@
-<!DOCTYPE html>
-<html>
+﻿<!DOCTYPE html>
+<html lang="es">
 <head>
   <meta charset="utf-8" />
-  <title>PAN-OS Config Auditor — Dashboard</title>
-  <link rel="stylesheet" href="nav.css" />
-  <link rel="stylesheet" href="dashboard.css" />
+  <title>PAN Helper v0.2.5 — Dashboard</title>
+  <link rel="stylesheet" href="css/nav.css" />
+  <link rel="stylesheet" href="css/app.css" />
 </head>
 <body>
   <div id="navbar-root"></div>
 
-  <header>
-    <div class="controls">
-      <select id="targetSelect"></select>
-      <select id="configSourceSelect" title="Running = active/effective config. Candidate = staged, uncommitted edits.">
-        <option value="running">Running config</option>
-        <option value="candidate">Candidate config</option>
-      </select>
-      <button id="fetchBtn" class="primary">Fetch &amp; Audit</button>
-      <button id="exportJsonBtn" disabled>Export Findings (JSON)</button>
-      <button id="exportCsvBtn" disabled>Export Findings (CSV)</button>
-      <button id="exportXmlBtn" disabled>Export Raw XML</button>
-    </div>
-  </header>
+  <div class="layout" id="layout">
 
-  <div id="statusBar" class="status-bar"></div>
-
-  <main id="results" class="hidden">
-    <section class="summary-cards" id="summaryCards"></section>
-
-    <nav class="tabs" id="tabs">
-      <button data-tab="disabled" class="tab active">Disabled Rules</button>
-      <button data-tab="unused" class="tab">Unused Objects</button>
-      <button data-tab="shadowed" class="tab">Possibly Shadowed</button>
-      <button data-tab="bestpractice" class="tab">Best Practice</button>
-      <button data-tab="optimizer" class="tab">Policy Optimizer</button>
+    <!-- ================= menu lateral de modulos ================= -->
+    <nav class="menu" id="menu">
+      <button class="menu-item activo" data-modulo="auditoria">
+        Auditoria
+        <span>Reglas deshabilitadas, objetos sin uso, malas practicas</span>
+      </button>
+      <button class="menu-item" data-modulo="backups">
+        Backups
+        <span>Configuracion y device-state</span>
+      </button>
+      <button class="menu-item" data-modulo="hardening">
+        Hardening App-ID
+        <span>Reglas con application = any</span>
+      </button>
+      <div class="menu-nota">
+        Todos los modulos usan las conexiones guardadas — no vuelves a
+        escribir credenciales. Administralas en <a href="connections.html">Conexiones</a>.
+      </div>
     </nav>
 
-    <section id="panel-disabled" class="panel"></section>
-    <section id="panel-unused" class="panel hidden"></section>
-    <section id="panel-shadowed" class="panel hidden"></section>
-    <section id="panel-bestpractice" class="panel hidden"></section>
-    <section id="panel-optimizer" class="panel hidden"></section>
-  </main>
+    <!-- franja colapsadora: oculta/muestra el menu para ampliar el area de trabajo -->
+    <button type="button" id="btn-menu" class="colapsador"
+            title="Ocultar / mostrar el menu de modulos">&laquo;</button>
 
-  <div id="optimizerModalRoot"></div>
+    <!-- ================= contenido ================= -->
+    <main class="contenido">
 
-  <script src="lib/navbar.js" type="module"></script>
-  <script src="dashboard.js" type="module"></script>
+      <!-- ---------- modulo: auditoria ---------- -->
+      <section id="modulo-auditoria" class="modulo activo">
+        <h2>Auditoria de configuracion</h2>
+        <p class="descripcion">
+          Descarga la configuracion y la analiza en el navegador: reglas
+          deshabilitadas, objetos sin uso (con cascada de grupos), duplicados,
+          posibles sombras y malas practicas en las politicas. En "Objetos sin
+          uso" puedes marcar los que sobran y eliminarlos con
+          <strong>Depurar</strong> — siempre en la candidate config, con
+          confirmacion previa y sin commit.
+        </p>
+
+        <div class="barra-controles">
+          <select id="a-target"></select>
+          <select id="a-source" title="Running = lo activo/efectivo ahora. Candidate = cambios en staging sin commit.">
+            <option value="running">Running config</option>
+            <option value="candidate">Candidate config</option>
+          </select>
+          <button id="a-btn" class="primario">Auditar</button>
+          <span class="separador"></span>
+          <button id="a-export-json" disabled>Exportar JSON</button>
+          <button id="a-export-csv" disabled>Exportar CSV</button>
+          <button id="a-export-xml" disabled>Exportar XML crudo</button>
+        </div>
+
+        <div id="a-resultados" class="oculto">
+          <section class="tarjetas" id="a-tarjetas"></section>
+
+          <nav class="tabs" id="a-tabs">
+            <button data-tab="disabled" class="tab activo">Reglas deshabilitadas</button>
+            <button data-tab="unused" class="tab">Objetos sin uso</button>
+            <button data-tab="duplicated" class="tab">Objetos duplicados</button>
+            <button data-tab="shadowed" class="tab">Posibles sombras</button>
+            <button data-tab="bestpractice" class="tab">Buenas practicas</button>
+          </nav>
+
+          <section id="a-panel-disabled" class="panel"></section>
+          <section id="a-panel-unused" class="panel oculto"></section>
+          <section id="a-panel-duplicated" class="panel oculto"></section>
+          <section id="a-panel-shadowed" class="panel oculto"></section>
+          <section id="a-panel-bestpractice" class="panel oculto"></section>
+        </div>
+      </section>
+
+      <!-- ---------- modulo: backups ---------- -->
+      <section id="modulo-backups" class="modulo">
+        <h2>Backups de configuracion y device-state</h2>
+        <p class="descripcion">
+          Descarga el <code>running-config</code> y el <code>device-state</code>
+          de cada equipo seleccionado, organizados por fecha en tu carpeta de
+          Descargas (<code>PAN-Helper/AAAA/Mes/DD/</code>).
+        </p>
+
+        <form id="form-backups">
+          <fieldset>
+            <legend>Equipos</legend>
+            <p class="nota">
+              Se usan las conexiones guardadas. Marca los equipos a respaldar.
+            </p>
+            <div id="b-targets" class="lista-checks"></div>
+          </fieldset>
+
+          <fieldset>
+            <legend>Que descargar</legend>
+            <label class="check">
+              <input type="checkbox" id="b-config" checked>
+              Configuracion (.xml)
+            </label>
+            <label class="check">
+              <input type="checkbox" id="b-devicestate" checked>
+              Device state (.tgz) — archivos grandes, tarda mas
+            </label>
+          </fieldset>
+
+          <div class="acciones">
+            <button type="submit" id="b-btn" class="primario">Ejecutar</button>
+            <span id="b-progreso" class="progreso"></span>
+          </div>
+        </form>
+      </section>
+
+      <!-- ---------- modulo: hardening ---------- -->
+      <section id="modulo-hardening" class="modulo">
+        <h2>Hardening de reglas con App-ID <span class="etiqueta-plataforma">firewall / Panorama</span></h2>
+        <p class="descripcion">
+          Descubre las aplicaciones realmente usadas por cada regla de forma
+          <strong>exhaustiva</strong>: consulta los logs permitidos por tandas
+          de 1000, negando en la query las apps ya conocidas
+          (<code>app neq</code>) hasta que no aparecen nuevas. Recomienda que
+          aplicaciones reemplazarian <code>application = any</code>.
+        </p>
+
+        <p class="aviso-lectura">
+          El analisis es de solo lectura (consulta logs de trafico). La unica
+          escritura posible es <strong>Clonar y ajustar</strong>: crea reglas
+          <code>-AppID</code> en la candidate config para las politicas que
+          marques, previa confirmacion. Nunca hace commit — revisar y hacer
+          commit en la GUI es obligatorio.
+        </p>
+
+        <form id="form-hardening">
+          <fieldset>
+            <legend>Equipo</legend>
+            <div class="fila">
+              <div>
+                <label for="h-target">Conexion</label>
+                <select id="h-target"></select>
+                <p class="nota-campo" id="h-plataforma"></p>
+              </div>
+              <div id="h-campo-vsys">
+                <label for="h-vsys">Vsys</label>
+                <input type="text" id="h-vsys" placeholder="vsys1">
+                <p class="nota-campo">
+                  Acota la consulta de logs. Vacio consulta todos los vsys; en
+                  equipos multi-vsys eso puede mezclar sesiones de reglas
+                  homonimas.
+                </p>
+              </div>
+            </div>
+          </fieldset>
+
+          <!-- Solo se muestra cuando la conexion es un Panorama -->
+          <fieldset id="h-panorama" class="oculto">
+            <legend>Panorama</legend>
+            <div class="fila">
+              <div>
+                <label for="h-devicegroup">Device group</label>
+                <input type="text" id="h-devicegroup" placeholder="DG-Sucursales">
+                <p class="nota-campo">
+                  Device-group donde viven las politicas a analizar. Obligatorio
+                  para clonar y ajustar.
+                </p>
+              </div>
+              <div>
+                <label for="h-rulebase">Rulebase</label>
+                <select id="h-rulebase">
+                  <option value="post" selected>Post-rulebase</option>
+                  <option value="pre">Pre-rulebase</option>
+                </select>
+                <p class="nota-campo">
+                  Donde esta la regla original y donde se creara la clonada.
+                </p>
+              </div>
+            </div>
+            <label for="h-dispositivos">Dispositivos (device_name), uno por linea</label>
+            <textarea id="h-dispositivos" rows="3"
+                      placeholder="FW-Sede-01&#10;FW-Sede-02"></textarea>
+            <p class="nota-campo">
+              Acota los logs a firewalls concretos. Vacio consulta los logs de
+              todos los equipos que reportan a este Panorama, lo que puede
+              mezclar sesiones si dos device-groups tienen reglas homonimas.
+            </p>
+          </fieldset>
+
+          <fieldset>
+            <legend>Politicas a analizar</legend>
+            <p class="nota">
+              Se analizan exactamente las politicas que indiques aqui. El
+              programa no lee el rulebase ni elige reglas por su cuenta.
+            </p>
+
+            <label for="h-reglas">Nombres de politica, uno por linea</label>
+            <textarea id="h-reglas" rows="7" required
+                      placeholder="rule-1&#10;rule-2&#10;rule-3"></textarea>
+
+            <div class="carga-csv">
+              <label for="h-csv" class="etiqueta-archivo">Cargar desde CSV</label>
+              <input type="file" id="h-csv" accept=".csv,text/csv">
+              <span class="nota-inline">
+                Columna <code>Rule</code>. Los nombres se cargan arriba para
+                que los revises antes de ejecutar.
+              </span>
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>Analisis</legend>
+            <div class="fila">
+              <div>
+                <label for="h-dias">Dias hacia atras</label>
+                <input type="number" id="h-dias" value="7" min="1" max="90" required>
+              </div>
+              <div>
+                <label>Descubrimiento</label>
+                <p class="nota-campo">
+                  Iterativo, en tandas de 1000 logs: cada tanda niega las
+                  aplicaciones ya vistas, asi ninguna app queda por fuera
+                  aunque el trafico este dominado por unas pocas. Maximo 100
+                  iteraciones por regla.
+                </p>
+              </div>
+            </div>
+            <label class="check" style="margin-top:10px;">
+              <input type="checkbox" id="h-csv-resumen" checked>
+              Descargar CSV resumen al finalizar
+              (<code>Descargas/PAN-Helper/hardening/</code>)
+            </label>
+          </fieldset>
+
+          <div class="acciones">
+            <button type="submit" id="h-btn" class="primario">Analizar</button>
+            <span id="h-progreso" class="progreso"></span>
+          </div>
+        </form>
+
+        <div id="h-resultado" class="panel-resultado"></div>
+      </section>
+
+      <!-- ---------- consola (siempre visible) ---------- -->
+      <section class="consola-wrap">
+        <div class="consola-cabecera">
+          <h3>Registro</h3>
+          <label class="check-consola" title="Muestra cada llamada a la API y el detalle interno del analisis.">
+            <input type="checkbox" id="chk-detalle" checked> Detalle
+          </label>
+          <button type="button" id="btn-cancelar" class="peligro"
+                  title="Aborta de inmediato toda llamada al firewall en curso (auditoria, backups, hardening).">
+            Cancelar llamadas
+          </button>
+          <button type="button" id="btn-limpiar" class="secundario">Limpiar</button>
+        </div>
+        <div id="consola" class="consola con-detalle"></div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="js/lib/navbar.js" type="module"></script>
+  <script src="js/dashboard.js" type="module"></script>
 </body>
 </html>

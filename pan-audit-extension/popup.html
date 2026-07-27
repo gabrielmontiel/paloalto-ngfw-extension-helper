@@ -1,10 +1,11 @@
-<!DOCTYPE html>
-<html>
+﻿<!DOCTYPE html>
+<html lang="es">
 <head>
   <meta charset="utf-8" />
   <style>
-    body { font-family: system-ui, sans-serif; width: 220px; padding: 14px; }
-    h1 { font-size: 14px; margin: 0 0 12px; }
+    body { font-family: system-ui, sans-serif; width: 230px; padding: 14px; }
+    h1 { font-size: 14px; margin: 0 0 4px; }
+    .ro { font-size: 11px; color: #1a7d3a; margin: 0 0 12px; }
     button {
       display: block; width: 100%; padding: 8px 10px; margin-bottom: 8px;
       border: 1px solid #d0d0d0; border-radius: 6px; background: #fafafa;
@@ -16,9 +17,10 @@
   </style>
 </head>
 <body>
-  <h1>PAN-OS Config Auditor</h1>
-  <button id="openDashboard" class="primary">Open Dashboard</button>
-  <button id="openOptions">Manage Connections</button>
+  <h1>PAN Helper v0.2.5</h1>
+  <p class="ro">Sin commit: toda escritura queda en candidate y se revisa manualmente.</p>
+  <button id="openDashboard" class="primary">Abrir dashboard</button>
+  <button id="openConnections">Administrar conexiones</button>
   <script src="popup.js" type="module"></script>
 </body>
 </html>

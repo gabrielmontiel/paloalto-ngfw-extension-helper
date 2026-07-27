@@ -1,0 +1,994 @@
+// js/dashboard.js
+// Shell del dashboard: cablea la UI con los modulos. Al agregar un modulo
+// nuevo, este archivo es el unico que lo registra (mismo patron que el
+// app.js de PAN-helper v0.1).
+
+import { getTargets, TARGETS_KEY } from "./lib/store.js";
+import { setApiLogger, cancelarTodo } from "./lib/panApi.js";
+import { reglasDesdeCsv, aCsv, descargarTexto } from "./lib/util.js";
+import { ejecutarAuditoria } from "./modules/audit.js";
+import { ejecutarBackups } from "./modules/backups.js";
+import { ejecutarHardening, clonarYAjustar } from "./modules/hardening.js";
+import { depurarObjetos, planificarDepuracion } from "./modules/depuracion.js";
+
+const $ = (id) => document.getElementById(id);
+
+// ---------------------------------------------------------------------------
+//  Consola (de PAN-helper v0.1, con nivel "debug" para el detalle de la API)
+// ---------------------------------------------------------------------------
+
+const consola = $("consola");
+
+function log(mensaje, nivel = "info") {
+  const linea = document.createElement("div");
+  linea.className = `linea ${nivel}`;
+
+  const hora = new Date().toLocaleTimeString("es-CO", { hour12: false });
+  const spanHora = document.createElement("span");
+  spanHora.className = "hora";
+  spanHora.textContent = hora;
+  linea.appendChild(spanHora);
+  linea.appendChild(document.createTextNode(mensaje));
+
+  consola.appendChild(linea);
+  consola.scrollTop = consola.scrollHeight;
+}
+
+// Cada llamada a la API de PAN-OS queda registrada aqui como linea "debug".
+setApiLogger(log);
+
+$("btn-limpiar").addEventListener("click", () => {
+  consola.textContent = "";
+});
+
+$("chk-detalle").addEventListener("change", (e) => {
+  consola.classList.toggle("con-detalle", e.target.checked);
+  consola.scrollTop = consola.scrollHeight;
+});
+
+// Boton rojo global: aborta de inmediato toda llamada al firewall en vuelo
+// (fetch y polls de logs). Los modulos terminan con "Operacion cancelada por
+// el usuario" y sus botones se rehabilitan en sus propios finally.
+$("btn-cancelar").addEventListener("click", () => {
+  cancelarTodo();
+  log("Cancelacion solicitada: se abortaron las llamadas al firewall en curso.", "warn");
+});
+
+// ---------------------------------------------------------------------------
+//  Menu lateral desplegable (amplia la zona de trabajo)
+// ---------------------------------------------------------------------------
+
+const MENU_KEY = "pan_helper_menu_colapsado";
+
+function aplicarMenu(colapsado) {
+  $("layout").classList.toggle("colapsado", colapsado);
+  $("btn-menu").innerHTML = colapsado ? "&raquo;" : "&laquo;";
+  $("btn-menu").title = colapsado
+    ? "Mostrar el menu de modulos"
+    : "Ocultar el menu de modulos";
+}
+
+$("btn-menu").addEventListener("click", () => {
+  const colapsado = !$("layout").classList.contains("colapsado");
+  aplicarMenu(colapsado);
+  localStorage.setItem(MENU_KEY, colapsado ? "1" : "0");
+});
+
+aplicarMenu(localStorage.getItem(MENU_KEY) === "1");
+
+// ---------------------------------------------------------------------------
+//  Navegacion entre modulos
+// ---------------------------------------------------------------------------
+
+for (const boton of document.querySelectorAll(".menu-item")) {
+  boton.addEventListener("click", () => {
+    const destino = boton.dataset.modulo;
+
+    for (const b of document.querySelectorAll(".menu-item")) {
+      b.classList.toggle("activo", b === boton);
+    }
+    for (const s of document.querySelectorAll(".modulo")) {
+      s.classList.toggle("activo", s.id === `modulo-${destino}`);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+//  Conexiones guardadas -> selects y lista de checkboxes
+// ---------------------------------------------------------------------------
+
+let targetsCache = [];
+
+async function poblarTargets() {
+  targetsCache = await getTargets();
+
+  // Selects de auditoria y hardening (conservan la seleccion si sigue viva).
+  for (const selectId of ["a-target", "h-target"]) {
+    const select = $(selectId);
+    const previo = select.value;
+    select.innerHTML = "";
+
+    if (!targetsCache.length) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "Sin conexiones — agrega una en Conexiones";
+      select.appendChild(opt);
+      continue;
+    }
+
+    for (const t of targetsCache) {
+      const opt = document.createElement("option");
+      opt.value = t.id;
+      opt.textContent = `${t.label} (${t.platform}) — ${t.host}`;
+      select.appendChild(opt);
+    }
+    if (targetsCache.some((t) => t.id === previo)) select.value = previo;
+  }
+
+  $("a-btn").disabled = !targetsCache.length;
+
+  // Lista de checkboxes de backups (conserva lo marcado si sigue vivo).
+  const marcados = new Set(
+    [...document.querySelectorAll("#b-targets input:checked")].map((i) => i.value)
+  );
+  const lista = $("b-targets");
+  lista.innerHTML = "";
+
+  if (!targetsCache.length) {
+    lista.innerHTML =
+      '<div class="vacio-checks">Sin conexiones guardadas. ' +
+      'Agrega una en <a href="connections.html">Conexiones</a>.</div>';
+    return;
+  }
+
+  for (const t of targetsCache) {
+    const etiqueta = document.createElement("label");
+    etiqueta.className = "check";
+
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = t.id;
+    input.checked = marcados.size ? marcados.has(t.id) : true;
+
+    const texto = document.createElement("span");
+    texto.textContent = `${t.label} `;
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = `(${t.platform} — ${t.host})`;
+    texto.appendChild(meta);
+
+    etiqueta.appendChild(input);
+    etiqueta.appendChild(texto);
+    lista.appendChild(etiqueta);
+  }
+}
+
+// Los campos de Panorama dependen de la conexion elegida, asi que se
+// reevaluan cada vez que cambia la lista de conexiones.
+function poblarTargetsYAjustar() {
+  return poblarTargets().then(ajustarFormularioHardening);
+}
+
+// Refresco en vivo al agregar/eliminar conexiones desde otra pestana.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes[TARGETS_KEY]) poblarTargetsYAjustar();
+});
+
+function targetPorId(id) {
+  return targetsCache.find((t) => t.id === id) || null;
+}
+
+// El formulario de hardening cambia segun la plataforma: un firewall pide
+// vsys; un Panorama pide device-group, rulebase (pre/post) y opcionalmente
+// los device_name para acotar los logs.
+function ajustarFormularioHardening() {
+  const target = targetPorId($("h-target").value);
+  const esPanorama = /panorama/i.test(target?.platform || "");
+
+  $("h-panorama").classList.toggle("oculto", !esPanorama);
+  $("h-campo-vsys").classList.toggle("oculto", esPanorama);
+
+  $("h-plataforma").textContent = !target
+    ? ""
+    : esPanorama
+    ? `Panorama (PAN-OS ${target.swVersion}): las politicas se buscan en un device-group.`
+    : `Firewall (PAN-OS ${target.swVersion}): las politicas se buscan en un vsys.`;
+}
+
+$("h-target").addEventListener("change", ajustarFormularioHardening);
+
+// ---------------------------------------------------------------------------
+//  Modulo: auditoria
+// ---------------------------------------------------------------------------
+
+let ultimaAuditoria = null;
+let ultimaConfigEl = null;
+let ultimaEtiqueta = "";
+
+const SEVERIDAD = { high: "alta", medium: "media", low: "baja", info: "info" };
+
+$("a-btn").addEventListener("click", async () => {
+  const target = targetPorId($("a-target").value);
+  if (!target) {
+    log("No hay conexion seleccionada. Agrega una en Conexiones.", "error");
+    return;
+  }
+  const source = $("a-source").value;
+
+  $("a-btn").disabled = true;
+  $("a-btn").textContent = "Auditando...";
+  $("a-resultados").classList.add("oculto");
+
+  try {
+    const { configEl, result } = await ejecutarAuditoria(target, source, log);
+    ultimaAuditoria = result;
+    ultimaConfigEl = configEl;
+    ultimaEtiqueta = target.label || target.host;
+
+    renderAuditoria(result);
+    $("a-export-json").disabled = false;
+    $("a-export-csv").disabled = false;
+    $("a-export-xml").disabled = false;
+  } catch (e) {
+    log(e.message, "error");
+  } finally {
+    $("a-btn").disabled = false;
+    $("a-btn").textContent = "Auditar";
+  }
+});
+
+export function renderAuditoria(result) {
+  $("a-resultados").classList.remove("oculto");
+
+  const s = result.summary;
+  const tarjetas = [
+    ["Reglas auditadas", s.totalRulesAudited],
+    ["Reglas deshabilitadas", s.disabledRuleCount],
+    ["Objetos sin uso", s.unusedObjectCount],
+    ["Objetos duplicados", s.duplicateObjectCount],
+    ["Posibles sombras", s.possiblyShadowedCount],
+    ["Buenas practicas", s.bestPracticeFindingCount],
+  ];
+  $("a-tarjetas").innerHTML = tarjetas
+    .map(([lbl, num]) => `<div class="tarjeta"><div class="num">${num}</div><div class="lbl">${escapeHtml(lbl)}</div></div>`)
+    .join("");
+
+  renderTabla(
+    "a-panel-disabled",
+    ["Ambito", "Rulebase", "Regla"],
+    result.disabledRules.map((r) => [escapeHtml(r.scope), escapeHtml(r.rulebase), escapeHtml(r.name)]),
+    "No se encontraron reglas deshabilitadas."
+  );
+
+  renderObjetosSinUso(result.unusedObjects);
+  renderObjetosDuplicados(result.duplicateObjects);
+
+  renderTabla(
+    "a-panel-shadowed",
+    ["Rulebase", "Regla que tapa", "Regla tapada", "Por que"],
+    result.possiblyShadowedRules.map((sh) => [
+      escapeHtml(sh.rulebase),
+      escapeHtml(sh.shadowingRule),
+      escapeHtml(sh.shadowedRule),
+      escapeHtml(sh.reason),
+    ]),
+    "No se encontraron sombras obvias (verificacion heuristica — confirmar siempre a mano)."
+  );
+
+  renderTabla(
+    "a-panel-bestpractice",
+    ["Severidad", "Ambito", "Rulebase", "Regla", "Hallazgo"],
+    result.bestPractice.map((b) => [
+      `<span class="badge ${b.severity}">${SEVERIDAD[b.severity] || b.severity}</span>`,
+      escapeHtml(b.scope),
+      escapeHtml(b.rulebase),
+      escapeHtml(b.rule),
+      escapeHtml(b.issue),
+    ]),
+    "No se encontraron hallazgos de buenas practicas."
+  );
+}
+
+// Pestana "Objetos sin uso": indice por tipo (chips clicables que llevan a
+// cada seccion) + una tabla por tipo, cada fila con checkbox para depurar.
+// El orden de las secciones es el orden seguro de eliminacion: primero los
+// grupos, despues sus miembros.
+const ORDEN_SINUSO = ["address-group", "service-group", "address", "service"];
+
+// Objetos sin uso del ultimo analisis, en el mismo indice que los checkbox.
+let objetosSinUso = [];
+
+function renderObjetosSinUso(objetos) {
+  const panel = $("a-panel-unused");
+  objetosSinUso = objetos;
+
+  if (!objetos.length) {
+    panel.innerHTML =
+      '<div class="vacio">No se encontraron objetos address/service sin uso ' +
+      "(nota: los grupos dinamicos por tag no se pueden verificar estaticamente).</div>";
+    return;
+  }
+
+  const porTipo = new Map(ORDEN_SINUSO.map((k) => [k, []]));
+  objetos.forEach((o, i) => {
+    if (!porTipo.has(o.kind)) porTipo.set(o.kind, []);
+    porTipo.get(o.kind).push({ o, i });
+  });
+
+  const chips = [];
+  const secciones = [];
+
+  for (const [tipo, lista] of porTipo) {
+    if (!lista.length) continue;
+    const anchor = `sinuso-${tipo}`;
+
+    chips.push(
+      `<button type="button" class="chip" data-anchor="${anchor}">` +
+        `${escapeHtml(tipo)} <span class="cuenta">${lista.length}</span></button>`
+    );
+
+    const filas = lista
+      .map(
+        ({ o, i }) =>
+          `<tr><td><input type="checkbox" class="d-check" data-idx="${i}"></td>` +
+          `<td>${escapeHtml(o.scope)}</td><td>${escapeHtml(o.name)}</td><td>` +
+          (o.enGrupoSinUso ? '<span class="badge cascada">en grupo sin uso</span> ' : "") +
+          `${escapeHtml(o.motivo)}</td></tr>`
+      )
+      .join("");
+
+    secciones.push(
+      `<h4 class="seccion-sinuso" id="${anchor}">${escapeHtml(tipo)} (${lista.length})</h4>` +
+        `<table><thead><tr>` +
+        `<th><input type="checkbox" class="d-check-tipo" data-tipo="${escapeHtml(tipo)}" ` +
+        `title="Seleccionar todos los ${escapeHtml(tipo)}"></th>` +
+        `<th>Ambito</th><th>Nombre</th><th>Motivo</th></tr></thead>` +
+        `<tbody>${filas}</tbody></table>`
+    );
+  }
+
+  panel.innerHTML =
+    `<div class="indice-sinuso">${chips.join("")}</div>` +
+    `<p class="nota-sinuso">Se evaluo el uso en todas las politicas (security, NAT, ` +
+    `decrypt, QoS, PBF...), en los grupos y en el resto de la configuracion ` +
+    `(virtual routers, rutas estaticas, VPN...): lo listado aqui no aparece en ` +
+    `ningun otro lado del firewall. Las secciones estan en orden seguro de ` +
+    `eliminacion: borrar primero los grupos y despues sus miembros evita ` +
+    `errores de referencia.</p>` +
+    `<div class="acciones-sinuso">` +
+    `<label class="check"><input type="checkbox" id="d-check-todo"> Seleccionar todo</label>` +
+    `<span class="separador"></span>` +
+    `<span id="d-seleccion" class="progreso"></span>` +
+    `<span id="d-progreso" class="progreso"></span>` +
+    `<button type="button" id="d-btn-depurar" class="peligro peligro-grande">Depurar</button>` +
+    `</div>` +
+    secciones.join("");
+
+  panel.querySelectorAll(".chip[data-anchor]").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      document
+        .getElementById(chip.dataset.anchor)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
+
+  const checks = [...panel.querySelectorAll(".d-check")];
+
+  const refrescar = () => {
+    const marcados = checks.filter((c) => c.checked);
+    $("d-seleccion").textContent = marcados.length
+      ? `${marcados.length} de ${checks.length} objeto(s) seleccionado(s)`
+      : "";
+    $("d-btn-depurar").disabled = marcados.length === 0;
+
+    const todo = $("d-check-todo");
+    todo.checked = marcados.length === checks.length;
+    todo.indeterminate = marcados.length > 0 && marcados.length < checks.length;
+
+    // Cada checkbox de seccion refleja el estado de su propio tipo.
+    for (const th of panel.querySelectorAll(".d-check-tipo")) {
+      const propios = checks.filter((c) => objetosSinUso[Number(c.dataset.idx)].kind === th.dataset.tipo);
+      const n = propios.filter((c) => c.checked).length;
+      th.checked = n === propios.length;
+      th.indeterminate = n > 0 && n < propios.length;
+    }
+  };
+
+  $("d-check-todo").addEventListener("change", (e) => {
+    for (const c of checks) c.checked = e.target.checked;
+    refrescar();
+  });
+
+  for (const th of panel.querySelectorAll(".d-check-tipo")) {
+    th.addEventListener("change", (e) => {
+      for (const c of checks) {
+        if (objetosSinUso[Number(c.dataset.idx)].kind === th.dataset.tipo) c.checked = e.target.checked;
+      }
+      refrescar();
+    });
+  }
+
+  for (const c of checks) c.addEventListener("change", refrescar);
+  $("d-btn-depurar").addEventListener("click", ejecutarDepuracion);
+
+  refrescar();
+}
+
+// Borrado de los objetos marcados. Operacion destructiva: se planifica sin
+// tocar la red, se muestra exactamente que se va a borrar y que se va a
+// omitir, y solo se procede tras confirmacion explicita.
+async function ejecutarDepuracion() {
+  const target = targetPorId($("a-target").value);
+  if (!target) {
+    log("No hay conexion seleccionada.", "error");
+    return;
+  }
+
+  const seleccion = [...document.querySelectorAll("#a-panel-unused .d-check:checked")]
+    .map((c) => objetosSinUso[Number(c.dataset.idx)])
+    .filter(Boolean);
+
+  if (!seleccion.length) {
+    log("Marca al menos un objeto para depurar.", "error");
+    return;
+  }
+
+  const { ediciones, aBorrar, bloqueados } = planificarDepuracion(seleccion);
+
+  const listado = aBorrar
+    .slice(0, 15)
+    .map((o) => `  - ${o.kind} '${o.name}' (${o.scope})`)
+    .join("\n");
+  const resto = aBorrar.length > 15 ? `\n  ...y ${aBorrar.length - 15} mas` : "";
+
+  // Grupos que se conservan y a los que primero hay que quitarles miembros.
+  const avisoEdiciones = ediciones.length
+    ? `\n\nANTES DE BORRAR se quitaran esos objetos de ${ediciones.length} grupo(s) que se ` +
+      `conservan:\n` +
+      ediciones
+        .slice(0, 10)
+        .map(
+          (e) =>
+            `  - ${e.grupo.name}: quita ${e.quitar.join(", ")} (le quedan ${e.restantes.length})`
+        )
+        .join("\n")
+    : "";
+
+  const avisoBloqueados = bloqueados.length
+    ? `\n\nSE OMITIRAN ${bloqueados.length} objeto(s) porque quitarlos dejaria vacio un grupo ` +
+      `(${bloqueados
+        .slice(0, 5)
+        .map((b) => `${b.objeto.name} -> ${b.gruposVacios.join(", ")}`)
+        .join("; ")}). Marca tambien esos grupos para eliminarlos completos.`
+    : "";
+
+  if (!aBorrar.length) {
+    log(
+      "Ninguno de los objetos seleccionados se puede borrar: quitarlos dejaria vacio " +
+        "un grupo estatico, algo que PAN-OS no admite.",
+      "error"
+    );
+    for (const b of bloqueados) {
+      log(`${b.objeto.name}: marca tambien el grupo ${b.gruposVacios.join(", ")}.`, "error");
+    }
+    return;
+  }
+
+  const confirmado = confirm(
+    `ATENCION: se ELIMINARAN ${aBorrar.length} objeto(s) de la CANDIDATE config de ` +
+      `${target.host}:\n\n${listado}${resto}${avisoEdiciones}${avisoBloqueados}\n\n` +
+      `Los grupos marcados se borran antes que sus miembros para evitar errores de ` +
+      `referencia.\n\n` +
+      `NO se hara commit — es obligatorio que revises los cambios en la GUI del firewall ` +
+      `antes de confirmarlos. Si algo sale mal, un "revert" en la GUI deshace todo.\n\n` +
+      `¿Continuar?`
+  );
+  if (!confirmado) {
+    log("Depuracion cancelada por el usuario antes de empezar.");
+    return;
+  }
+
+  const btn = $("d-btn-depurar");
+  btn.disabled = true;
+  btn.textContent = "Depurando...";
+  $("d-progreso").textContent = "";
+
+  try {
+    await depurarObjetos({ target, seleccion }, log, (hechos, total) => {
+      $("d-progreso").textContent = `${hechos} / ${total}`;
+    });
+    log(
+      "Vuelve a ejecutar la auditoria para ver la configuracion actualizada.",
+      "warn"
+    );
+  } catch (e) {
+    log(e.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Depurar";
+  }
+}
+
+// Pestana "Objetos duplicados": mismo patron de indice + secciones que
+// "Objetos sin uso", agrupado por criterio y tipo.
+//  - valor:  objetos distintos con el mismo contenido (misma IP/red/FQDN o
+//            mismo protocolo/puerto) — candidatos a consolidarse en uno.
+//  - nombre: el mismo nombre definido en varios ambitos — el mas cercano
+//            tapa al heredado.
+// Cada objeto lleva su insignia "en uso" / "sin uso" (misma evaluacion que
+// la pestana de objetos sin uso) para decidir cual duplicado se depura.
+function renderObjetosDuplicados(duplicados) {
+  const panel = $("a-panel-duplicated");
+
+  if (!duplicados.length) {
+    panel.innerHTML = '<div class="vacio">No se encontraron objetos duplicados por valor ni por nombre.</div>';
+    return;
+  }
+
+  // Agrupar por criterio + tipo, respetando el orden ya calculado
+  // (valor primero, despues nombre; dentro, por tipo).
+  const secciones = new Map(); // `${criterio}::${kind}` -> lista
+  for (const d of duplicados) {
+    const clave = `${d.criterio}::${d.kind}`;
+    if (!secciones.has(clave)) secciones.set(clave, []);
+    secciones.get(clave).push(d);
+  }
+
+  const badgeUso = (o) =>
+    o.enUso
+      ? '<span class="badge uso">en uso</span>'
+      : '<span class="badge sinuso">sin uso</span>';
+
+  const chips = [];
+  const html = [];
+
+  for (const [clave, lista] of secciones) {
+    const [criterio, kind] = clave.split("::");
+    const anchor = `dup-${criterio}-${kind}`;
+    const titulo = `por ${criterio}: ${kind}`;
+
+    chips.push(
+      `<button type="button" class="chip" data-anchor="${anchor}">` +
+        `${escapeHtml(titulo)} <span class="cuenta">${lista.length}</span></button>`
+    );
+
+    const filas = lista
+      .map((d) => {
+        const objetos = d.objetos
+          .map((o) => `${escapeHtml(o.scope)} — ${escapeHtml(o.name)} ${badgeUso(o)}`)
+          .join("<br>");
+        return `<tr><td>${escapeHtml(d.clave)}</td><td>${objetos}</td></tr>`;
+      })
+      .join("");
+
+    html.push(
+      `<h4 class="seccion-sinuso" id="${anchor}">${escapeHtml(titulo)} (${lista.length})</h4>` +
+        `<table><thead><tr><th>${criterio === "valor" ? "Valor" : "Nombre"}</th>` +
+        `<th>Objetos (ambito — nombre — uso)</th></tr></thead><tbody>${filas}</tbody></table>`
+    );
+  }
+
+  panel.innerHTML =
+    `<div class="indice-sinuso">${chips.join("")}</div>` +
+    `<p class="nota-sinuso">"en uso" = el objeto aparece en alguna politica ` +
+    `(security, NAT, decrypt, QoS, PBF...), en un grupo en uso o en otra parte ` +
+    `de la configuracion; "sin uso" = candidato a depurar.</p>` +
+    html.join("");
+
+  panel.querySelectorAll(".chip[data-anchor]").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      document
+        .getElementById(chip.dataset.anchor)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
+}
+
+function renderTabla(panelId, cabeceras, filas, mensajeVacio) {
+  const panel = $(panelId);
+  if (!filas.length) {
+    panel.innerHTML = `<div class="vacio">${escapeHtml(mensajeVacio)}</div>`;
+    return;
+  }
+  const thead = `<thead><tr>${cabeceras.map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead>`;
+  const tbody = `<tbody>${filas.map((f) => `<tr>${f.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody>`;
+  panel.innerHTML = `<table>${thead}${tbody}</table>`;
+}
+
+$("a-tabs").addEventListener("click", (e) => {
+  const btn = e.target.closest(".tab");
+  if (!btn) return;
+  document.querySelectorAll("#a-tabs .tab").forEach((t) => t.classList.remove("activo"));
+  document.querySelectorAll("#modulo-auditoria .panel").forEach((p) => p.classList.add("oculto"));
+  btn.classList.add("activo");
+  $(`a-panel-${btn.dataset.tab}`).classList.remove("oculto");
+});
+
+// --- exportaciones (a Descargas/PAN-Helper/auditoria/) ---
+
+function marcaTiempo() {
+  return new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+}
+
+function slug(s) {
+  return (s || "equipo").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+}
+
+function baseExport() {
+  return `PAN-Helper/auditoria/${slug(ultimaEtiqueta)}_${marcaTiempo()}`;
+}
+
+$("a-export-json").addEventListener("click", async () => {
+  try {
+    const ruta = `${baseExport()}.json`;
+    await descargarTexto(JSON.stringify(ultimaAuditoria, null, 2), ruta, "application/json");
+    log(`Hallazgos exportados a Descargas/${ruta}`, "ok");
+  } catch (e) {
+    log(e.message, "error");
+  }
+});
+
+$("a-export-csv").addEventListener("click", async () => {
+  try {
+    const filas = [];
+    for (const r of ultimaAuditoria.disabledRules) {
+      filas.push({ seccion: "regla_deshabilitada", ambito: r.scope, rulebase: r.rulebase, nombre: r.name, detalle: "" });
+    }
+    for (const o of ultimaAuditoria.unusedObjects) {
+      filas.push({ seccion: "objeto_sin_uso", ambito: o.scope, rulebase: o.kind, nombre: o.name, detalle: o.motivo });
+    }
+    for (const d of ultimaAuditoria.duplicateObjects) {
+      filas.push({
+        seccion: "objeto_duplicado",
+        ambito: `por ${d.criterio}`,
+        rulebase: d.kind,
+        nombre: d.clave,
+        detalle: d.objetos
+          .map((o) => `${o.scope} — ${o.name} [${o.enUso ? "en uso" : "sin uso"}]`)
+          .join("; "),
+      });
+    }
+    for (const s of ultimaAuditoria.possiblyShadowedRules) {
+      filas.push({ seccion: "posible_sombra", ambito: s.rulebase, rulebase: s.shadowingRule, nombre: s.shadowedRule, detalle: s.reason });
+    }
+    for (const b of ultimaAuditoria.bestPractice) {
+      filas.push({ seccion: "buena_practica", ambito: b.scope, rulebase: b.rulebase, nombre: b.rule, detalle: `[${b.severity}] ${b.issue}` });
+    }
+    const ruta = `${baseExport()}.csv`;
+    await descargarTexto(aCsv(filas), ruta);
+    log(`Hallazgos exportados a Descargas/${ruta}`, "ok");
+  } catch (e) {
+    log(e.message, "error");
+  }
+});
+
+$("a-export-xml").addEventListener("click", async () => {
+  try {
+    if (!ultimaConfigEl) return;
+    const xml = new XMLSerializer().serializeToString(ultimaConfigEl);
+    const ruta = `${baseExport()}.xml`;
+    await descargarTexto(xml, ruta, "application/xml");
+    log(`Config XML exportada a Descargas/${ruta}`, "ok");
+  } catch (e) {
+    log(e.message, "error");
+  }
+});
+
+// ---------------------------------------------------------------------------
+//  Modulo: backups
+// ---------------------------------------------------------------------------
+
+$("form-backups").addEventListener("submit", async (evento) => {
+  evento.preventDefault();
+
+  const seleccionados = [...document.querySelectorAll("#b-targets input:checked")]
+    .map((i) => targetPorId(i.value))
+    .filter(Boolean);
+
+  if (!seleccionados.length) {
+    log("Marca al menos un equipo para respaldar.", "error");
+    return;
+  }
+
+  const incluirConfig = $("b-config").checked;
+  const incluirDeviceState = $("b-devicestate").checked;
+
+  if (!incluirConfig && !incluirDeviceState) {
+    log("Selecciona al menos un artefacto para descargar.", "error");
+    return;
+  }
+
+  const btn = $("b-btn");
+  btn.disabled = true;
+  btn.textContent = "Ejecutando...";
+  $("b-progreso").textContent = `0 / ${seleccionados.length}`;
+
+  try {
+    await ejecutarBackups(
+      { targets: seleccionados, incluirConfig, incluirDeviceState },
+      log,
+      (hechos, total) => {
+        $("b-progreso").textContent = `${hechos} / ${total}`;
+      }
+    );
+  } catch (e) {
+    log(e.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Ejecutar";
+  }
+});
+
+// ---------------------------------------------------------------------------
+//  Modulo: hardening App-ID
+// ---------------------------------------------------------------------------
+
+// Al cargar un CSV se vuelca la lista al textarea, no se usa directamente:
+// asi queda a la vista y editable antes de ejecutar.
+$("h-csv").addEventListener("change", async (evento) => {
+  const archivo = evento.target.files?.[0];
+  if (!archivo) return;
+
+  try {
+    const reglas = reglasDesdeCsv(await archivo.text());
+
+    if (!reglas.length) {
+      log(`'${archivo.name}': la columna 'Rule' no tiene valores.`, "warn");
+      return;
+    }
+
+    $("h-reglas").value = reglas.join("\n");
+    log(`'${archivo.name}': ${reglas.length} politica(s) cargadas. Revisalas antes de ejecutar.`, "ok");
+  } catch (e) {
+    log(`No se pudo leer '${archivo.name}': ${e.message}`, "error");
+  } finally {
+    // Permite volver a cargar el mismo archivo si el usuario lo corrige.
+    evento.target.value = "";
+  }
+});
+
+$("form-hardening").addEventListener("submit", async (evento) => {
+  evento.preventDefault();
+
+  const target = targetPorId($("h-target").value);
+  if (!target) {
+    log("No hay conexion seleccionada. Agrega una en Conexiones.", "error");
+    return;
+  }
+
+  // Lista explicita del usuario. Se respeta el orden y se quitan duplicados.
+  const reglas = [
+    ...new Set(
+      $("h-reglas")
+        .value.split("\n")
+        .map((r) => r.trim())
+        .filter(Boolean)
+    ),
+  ];
+
+  if (!reglas.length) {
+    log("Indica al menos una politica a analizar.", "error");
+    return;
+  }
+
+  const esPanorama = /panorama/i.test(target.platform || "");
+
+  if (esPanorama && !$("h-devicegroup").value.trim()) {
+    log("Indica el device-group: en Panorama las politicas viven dentro de uno.", "error");
+    return;
+  }
+
+  const config = {
+    target,
+    reglas,
+    dias: Number($("h-dias").value),
+    descargarCsv: $("h-csv-resumen").checked,
+    vsys: esPanorama ? null : $("h-vsys").value.trim() || null,
+    deviceGroup: esPanorama ? $("h-devicegroup").value.trim() : null,
+    rulebase: esPanorama ? $("h-rulebase").value : null,
+    dispositivos: esPanorama
+      ? $("h-dispositivos")
+          .value.split("\n")
+          .map((d) => d.trim())
+          .filter(Boolean)
+      : null,
+  };
+
+  const btn = $("h-btn");
+  btn.disabled = true;
+  btn.textContent = "Analizando...";
+  $("h-progreso").textContent = "";
+  $("h-resultado").innerHTML = "";
+
+  try {
+    const { resumen } = await ejecutarHardening(config, log, (hechos, total) => {
+      $("h-progreso").textContent = `${hechos} / ${total} reglas`;
+    });
+    // "Clonar y ajustar" actua sobre el mismo equipo y ubicacion del analisis.
+    renderResumenHardening({
+      target,
+      vsys: config.vsys,
+      deviceGroup: config.deviceGroup,
+      rulebase: config.rulebase,
+      resumen,
+    });
+  } catch (e) {
+    log(e.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Analizar";
+  }
+});
+
+// Contexto del ultimo analisis (equipo, vsys y resumen con la lista cruda
+// de apps por regla), necesario para "Clonar y ajustar".
+let ultimoHardening = null;
+
+// Tabla de resultados: checkbox por politica (deshabilitado si no hay apps
+// que configurar), "seleccionar todo", sufijo configurable y boton "Clonar
+// y ajustar" que solo actua sobre las marcadas. La columna Iteraciones NO
+// se muestra (queda en la consola y en el CSV); el usuario no la necesita
+// para decidir.
+export function renderResumenHardening(contexto) {
+  const { resumen } = contexto;
+  const cont = $("h-resultado");
+  if (!resumen?.length) {
+    cont.innerHTML = "";
+    ultimoHardening = null;
+    return;
+  }
+  ultimoHardening = contexto;
+
+  const cabeceras = ["Politica", "Total Apps", "Aplicaciones Recomendadas", "Apps Alerta"];
+  const clonables = resumen.filter((r) => (r._apps || []).length).length;
+
+  const filas = resumen
+    .map((r, i) => {
+      const clonable = (r._apps || []).length > 0;
+      const check =
+        `<input type="checkbox" class="h-check" data-idx="${i}"` +
+        (clonable ? "" : " disabled title='Sin aplicaciones que configurar'") +
+        ">";
+      return `<tr><td>${check}</td>${cabeceras.map((c) => `<td>${escapeHtml(r[c])}</td>`).join("")}</tr>`;
+    })
+    .join("");
+
+  // "Seleccionar todo" solo alcanza a las politicas clonables: las que no
+  // tienen apps que configurar quedan siempre fuera (su checkbox esta
+  // deshabilitado). Si ninguna es clonable, tampoco tiene sentido.
+  const checkTodo =
+    `<input type="checkbox" id="h-check-todo"` +
+    (clonables ? "" : " disabled") +
+    ` title="Seleccionar todas las politicas con aplicaciones (${clonables} de ${resumen.length})">`;
+
+  cont.innerHTML =
+    `<table><thead><tr><th>${checkTodo}</th>` +
+    `${cabeceras.map((c) => `<th>${escapeHtml(c)}</th>`).join("")}</tr></thead>` +
+    `<tbody>${filas}</tbody></table>` +
+    `<div class="clonar-opciones">` +
+    `<label for="h-sufijo">Sufijo de la regla nueva</label>` +
+    `<input type="text" id="h-sufijo" value="${SUFIJO_POR_DEFECTO}" maxlength="30" ` +
+    `title="Se agrega al nombre de la regla original. Por defecto -AppID.">` +
+    `<span class="nota-inline" id="h-sufijo-ejemplo"></span>` +
+    `</div>` +
+    `<p class="nota-clonar">"Clonar y ajustar" crea, para cada politica marcada, una regla ` +
+    `clonada de la original con el campo application reemplazado por las apps descubiertas, ` +
+    `y la mueve justo antes de la original. Todo queda en la <strong>candidate config</strong>: ` +
+    `la extension no puede hacer commit — debes revisar y hacer commit manualmente en la GUI.</p>` +
+    `<div class="acciones">` +
+    `<button type="button" id="h-btn-clonar" class="primario">Clonar y ajustar</button>` +
+    `<span id="h-clonar-seleccion" class="progreso"></span>` +
+    `<span id="h-clonar-progreso" class="progreso"></span>` +
+    `</div>`;
+
+  const checks = [...cont.querySelectorAll(".h-check:not(:disabled)")];
+
+  const refrescarSeleccion = () => {
+    const marcados = checks.filter((c) => c.checked).length;
+    $("h-clonar-seleccion").textContent =
+      `${marcados} de ${clonables} politica(s) seleccionada(s)` +
+      (clonables < resumen.length ? ` — ${resumen.length - clonables} sin apps, no aplica` : "");
+    const todo = $("h-check-todo");
+    todo.checked = marcados > 0 && marcados === clonables;
+    todo.indeterminate = marcados > 0 && marcados < clonables;
+  };
+
+  $("h-check-todo").addEventListener("change", (e) => {
+    for (const c of checks) c.checked = e.target.checked;
+    refrescarSeleccion();
+  });
+  for (const c of checks) c.addEventListener("change", refrescarSeleccion);
+
+  const refrescarEjemplo = () => {
+    const sufijo = sufijoActual();
+    const base = resumen[0]?.Politica || "rule-1";
+    $("h-sufijo-ejemplo").textContent = `Ejemplo: ${base}${sufijo}`;
+  };
+  $("h-sufijo").addEventListener("input", refrescarEjemplo);
+
+  refrescarSeleccion();
+  refrescarEjemplo();
+
+  $("h-btn-clonar").addEventListener("click", ejecutarClonado);
+}
+
+const SUFIJO_POR_DEFECTO = "-AppID";
+
+/** Sufijo indicado por el usuario, saneado; vacio vuelve al de por defecto. */
+function sufijoActual() {
+  // PAN-OS acepta letras, digitos, espacio, punto, guion y guion bajo en el
+  // nombre de una regla; se descarta cualquier otro caracter.
+  const bruto = ($("h-sufijo")?.value ?? "").replace(/[^\w .-]/g, "").trim();
+  return bruto || SUFIJO_POR_DEFECTO;
+}
+
+async function ejecutarClonado() {
+  if (!ultimoHardening) return;
+  const { target, vsys, deviceGroup, rulebase, resumen } = ultimoHardening;
+
+  const seleccion = [...document.querySelectorAll("#h-resultado .h-check:checked")]
+    .map((chk) => resumen[Number(chk.dataset.idx)])
+    .filter((r) => r && (r._apps || []).length)
+    .map((r) => ({ regla: r.Politica, apps: r._apps }));
+
+  if (!seleccion.length) {
+    log("Marca al menos una politica con aplicaciones para clonar.", "error");
+    return;
+  }
+
+  const sufijo = sufijoActual();
+  const esPanorama = /panorama/i.test(target.platform || "");
+
+  const ubicacion = esPanorama
+    ? `el ${rulebase === "pre" ? "pre" : "post"}-rulebase del device-group "${deviceGroup}"`
+    : `el vsys "${vsys || "vsys1"}"`;
+
+  const confirmado = confirm(
+    `Se escribiran ${seleccion.length} regla(s) con sufijo "${sufijo}" en la CANDIDATE config ` +
+      `de ${target.host}, en ${ubicacion}, y se moveran antes de su regla original.\n\n` +
+      `Ejemplo: ${seleccion[0].regla}${sufijo}\n\n` +
+      `Si alguna ya existe, se le agregan solo las aplicaciones nuevas (merge); la regla ` +
+      `original nunca se modifica.\n\n` +
+      `NO se hara commit — es obligatorio que revises las reglas en la GUI` +
+      (esPanorama ? " y hagas commit a Panorama + push al device-group" : " y hagas el commit") +
+      ` manualmente.\n\n¿Continuar?`
+  );
+  if (!confirmado) {
+    log("Clonado cancelado por el usuario antes de empezar.");
+    return;
+  }
+
+  const btn = $("h-btn-clonar");
+  btn.disabled = true;
+  btn.textContent = "Clonando...";
+  $("h-clonar-progreso").textContent = "";
+
+  try {
+    await clonarYAjustar(
+      { target, vsys, deviceGroup, rulebase, seleccion, sufijo },
+      log,
+      (hechos, total) => {
+        $("h-clonar-progreso").textContent = `${hechos} / ${total}`;
+      }
+    );
+  } catch (e) {
+    log(e.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Clonar y ajustar";
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+await poblarTargetsYAjustar();
+log("Listo. Elige un modulo; todos usan las conexiones guardadas (sin credenciales repetidas).");
+log(
+  "Sin commit: la extension escribe solo en la candidate config y solo cuando lo pides. " +
+    "La revision y el commit son siempre manuales.",
+  "ok"
+);

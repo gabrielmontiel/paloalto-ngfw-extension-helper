@@ -1,0 +1,299 @@
+/* css/app.css — dashboard de PAN Helper v0.2.
+   Mezcla: paleta y consola de PAN-helper v0.1 + tarjetas/tabs/tablas/badges
+   de pan-audit-extension. */
+
+:root {
+  --azul: #1a5fb4;
+  --azul-oscuro: #164e94;
+  --borde: #e2e2e2;
+  --fondo: #f6f7f9;
+  --texto: #1a1a1a;
+  --tenue: #666;
+  --ok: #1a7d3a;
+  --error: #b41a1a;
+  --warn: #a86a00;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  color: var(--texto);
+  background: var(--fondo);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 250px 18px 1fr;
+  gap: 12px;
+  padding: 20px 24px;
+  max-width: 1280px;
+  margin: 0 auto;
+}
+
+/* Menu colapsado: el menu sale del flujo (display:none), asi que la grilla
+   queda con DOS items (colapsador + contenido) y debe redefinirse a dos
+   columnas. Dejar tres columnas aqui rompia todo el layout: el colapsador
+   caia en la columna de 0px y el contenido en la de 18px. */
+.layout.colapsado { grid-template-columns: 18px 1fr; }
+.layout.colapsado .menu { display: none; }
+
+.colapsador {
+  border: 1px solid var(--borde);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--tenue);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+  width: 18px;
+  align-self: stretch;
+  max-height: 480px;
+}
+.colapsador:hover { background: #eef4fa; color: var(--azul); border-color: var(--azul); }
+
+/* --- menu lateral --- */
+.menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border: 1px solid var(--borde);
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--texto);
+}
+.menu-item + .menu-item { margin-top: 8px; }
+.menu-item.activo { border-color: var(--azul); background: #eef4fa; color: var(--azul); }
+.menu-item span { display: block; font-weight: 400; font-size: 11px; color: var(--tenue); margin-top: 2px; }
+.menu-nota { margin-top: 14px; font-size: 11px; color: var(--tenue); line-height: 1.55; padding: 0 4px; }
+.menu-nota a { color: var(--azul); }
+
+/* --- contenido --- */
+.contenido { min-width: 0; }
+.modulo {
+  display: none;
+  background: #fff;
+  border: 1px solid var(--borde);
+  border-radius: 10px;
+  padding: 22px 24px;
+}
+.modulo.activo { display: block; }
+.modulo h2 { margin: 0 0 4px; font-size: 16px; color: var(--azul); }
+.descripcion { margin: 0 0 16px; color: var(--tenue); font-size: 13px; line-height: 1.5; }
+.etiqueta-plataforma {
+  display: inline-block; margin-left: 8px; vertical-align: middle;
+  background: #eef4fa; color: var(--azul); border: 1px solid #cfe0f2;
+  border-radius: 999px; padding: 2px 10px; font-size: 11px; font-weight: 600;
+}
+
+code { background: var(--fondo); padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+
+.oculto { display: none !important; }
+
+/* --- barra de controles (auditoria) --- */
+.barra-controles {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 0 16px;
+}
+.barra-controles .separador { flex: 1; }
+select, .barra-controles button {
+  font-size: 13px; padding: 7px 10px; border-radius: 6px;
+  border: 1px solid #ccc; background: white; cursor: pointer;
+}
+/* La regla anterior es mas especifica que .primario y le pisaba el fondo
+   azul, dejando texto blanco sobre fondo blanco. Override explicito. */
+.barra-controles button.primario {
+  background: var(--azul); border-color: var(--azul); color: #fff;
+}
+.barra-controles button.primario:hover { background: var(--azul-oscuro); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* --- tarjetas de resumen --- */
+.tarjetas {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px; margin-bottom: 20px;
+}
+.tarjeta {
+  background: white; border: 1px solid var(--borde); border-radius: 10px; padding: 14px;
+}
+.tarjeta .num { font-size: 24px; font-weight: 700; }
+.tarjeta .lbl { font-size: 12px; color: var(--tenue); margin-top: 4px; }
+
+/* --- tabs --- */
+.tabs { display: flex; gap: 6px; margin-bottom: 14px; border-bottom: 1px solid var(--borde); flex-wrap: wrap; }
+.tab {
+  border: none; background: none; padding: 10px 14px; font-size: 13px; cursor: pointer;
+  border-bottom: 2px solid transparent; color: #555;
+}
+.tab.activo { color: var(--azul); border-bottom-color: var(--azul); font-weight: 600; }
+
+/* --- paneles con tablas --- */
+.panel { border: 1px solid var(--borde); border-radius: 10px; padding: 4px; overflow-x: auto; }
+.panel table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.panel th, .panel td { text-align: left; padding: 9px 12px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+.panel th { color: #555; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.02em; }
+.panel tr:last-child td { border-bottom: none; }
+.vacio { padding: 24px; text-align: center; color: #888; font-size: 13px; }
+
+.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.badge.high { background: #fde3e3; color: #b41a1a; }
+.badge.medium { background: #fdefe0; color: #b4701a; }
+.badge.low { background: #eaf1fc; color: #1a5fb4; }
+.badge.info { background: #eee; color: #555; }
+.badge.cascada { background: #fdefe0; color: #b4701a; }
+.badge.uso { background: #eaf5ed; color: #1a7d3a; }
+.badge.sinuso { background: #fdefe0; color: #b4701a; }
+
+/* --- indice de objetos sin uso (por tipo) --- */
+.indice-sinuso {
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+  padding: 12px 12px 4px;
+}
+.indice-sinuso .chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--borde); border-radius: 999px;
+  background: #fff; color: var(--azul);
+  padding: 4px 12px; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.indice-sinuso .chip:hover { background: #eef4fa; border-color: var(--azul); }
+.indice-sinuso .chip .cuenta {
+  background: #eef4fa; color: var(--azul);
+  border-radius: 999px; padding: 0 7px; font-size: 11px;
+}
+.nota-sinuso {
+  margin: 4px 12px 8px; font-size: 12px; color: var(--tenue); line-height: 1.5;
+}
+.seccion-sinuso {
+  margin: 0 12px 6px; padding-top: 10px;
+  font-size: 13px; font-weight: 700; color: var(--azul);
+  border-top: 1px solid var(--borde);
+  scroll-margin-top: 8px;
+}
+.seccion-sinuso:first-of-type { border-top: none; }
+
+/* --- barra de acciones de depuracion --- */
+.acciones-sinuso {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin: 0 12px 10px; padding: 10px 12px;
+  background: var(--fondo); border: 1px solid var(--borde); border-radius: 8px;
+}
+.acciones-sinuso .check { margin: 0; font-size: 13px; font-weight: 600; }
+.acciones-sinuso .separador { flex: 1; }
+.acciones-sinuso .progreso { font-size: 12px; }
+.peligro-grande { padding: 8px 20px; font-size: 13px; }
+.peligro:disabled { background: #d9a5a2; border-color: #d9a5a2; cursor: not-allowed; }
+.panel .d-check, .panel .d-check-tipo { width: auto; margin: 0; cursor: pointer; }
+
+/* --- formularios (backups / hardening) --- */
+fieldset { border: 1px solid var(--borde); border-radius: 8px; padding: 14px 16px; margin: 0 0 16px; }
+legend { font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--tenue); padding: 0 6px; }
+
+label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+input[type=text], input[type=number], textarea, select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+}
+textarea { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; resize: vertical; }
+input:focus, textarea:focus, select:focus { outline: 2px solid var(--azul); outline-offset: -1px; border-color: var(--azul); }
+
+.fila { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.nota { font-size: 12px; color: var(--tenue); margin: 0 0 12px; line-height: 1.5; }
+.nota-campo { font-size: 11px; color: var(--tenue); margin: 5px 0 0; line-height: 1.45; font-weight: 400; }
+.check { display: flex; align-items: center; gap: 8px; font-weight: 400; font-size: 13px; margin-bottom: 8px; }
+.check input { width: auto; margin: 0; }
+
+.lista-checks { display: flex; flex-direction: column; gap: 4px; }
+.lista-checks .check .meta { color: var(--tenue); font-size: 12px; }
+.lista-checks .vacio-checks { font-size: 12px; color: var(--tenue); }
+.lista-checks .vacio-checks a { color: var(--azul); }
+
+.aviso-lectura {
+  background: #eaf5ed; border: 1px solid #b8ddc4; color: var(--ok);
+  border-radius: 6px; padding: 9px 12px; font-size: 12px;
+  margin: 0 0 16px; line-height: 1.5;
+}
+
+.carga-csv {
+  margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--borde);
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.etiqueta-archivo { margin: 0; white-space: nowrap; }
+.carga-csv input[type=file] { font-size: 12px; max-width: 240px; width: auto; }
+.nota-inline { font-size: 11px; color: var(--tenue); flex: 1; min-width: 200px; }
+
+.acciones { display: flex; align-items: center; gap: 14px; }
+.primario {
+  background: var(--azul); color: #fff; border: 1px solid var(--azul);
+  padding: 9px 22px; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer;
+}
+.primario:hover { background: var(--azul-oscuro); }
+.primario:disabled { background: #9aa7b4; border-color: #9aa7b4; cursor: default; }
+.secundario {
+  background: #fff; border: 1px solid var(--borde); color: var(--tenue);
+  padding: 4px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;
+}
+.peligro {
+  background: var(--error); border: 1px solid var(--error); color: #fff;
+  padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.peligro:hover { background: #8f1410; border-color: #8f1410; }
+.progreso { font-size: 13px; color: var(--tenue); font-variant-numeric: tabular-nums; }
+
+.panel-resultado { margin-top: 18px; }
+.panel-resultado table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.panel-resultado th, .panel-resultado td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+.panel-resultado th { color: #555; font-weight: 600; font-size: 12px; text-transform: uppercase; }
+.panel-resultado .h-check,
+.panel-resultado #h-check-todo { width: auto; margin: 2px 0 0; cursor: pointer; }
+.panel-resultado .h-check:disabled,
+.panel-resultado #h-check-todo:disabled { cursor: not-allowed; }
+
+.clonar-opciones {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--borde);
+}
+.clonar-opciones label { margin: 0; white-space: nowrap; }
+.clonar-opciones input[type=text] {
+  width: auto; max-width: 200px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+.nota-clonar {
+  font-size: 12px; color: var(--tenue); line-height: 1.55;
+  background: #fdefe0; border: 1px solid #f3d8ad; color: #7a4a00;
+  border-radius: 8px; padding: 10px 12px; margin: 14px 0;
+}
+.panel-resultado .acciones { margin-top: 4px; }
+
+/* --- consola (de PAN-helper v0.1, ahora con nivel debug) --- */
+.consola-wrap { margin-top: 20px; }
+.consola-cabecera { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; }
+.consola-cabecera h3 {
+  margin: 0; font-size: 13px; color: var(--tenue);
+  text-transform: uppercase; letter-spacing: .04em; margin-right: auto;
+}
+.check-consola { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 400; color: var(--tenue); margin: 0; cursor: pointer; }
+.check-consola input { width: auto; margin: 0; }
+.consola {
+  background: #10151b; color: #d5dbe2;
+  border-radius: 8px; padding: 12px 14px;
+  height: 240px; overflow-y: auto;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px; line-height: 1.65;
+}
+.linea { white-space: pre-wrap; word-break: break-word; }
+.hora { color: #5c6773; margin-right: 10px; }
+.linea.ok { color: #6cd08a; }
+.linea.error { color: #f08a80; }
+.linea.warn { color: #e8b955; }
+.linea.debug { color: #7d8b9c; display: none; }
+.consola.con-detalle .linea.debug { display: block; }

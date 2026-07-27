@@ -1,175 +1,395 @@
-# PAN-OS Config Auditor (Chrome extension)
+# PAN Helper v0.2.5 — extensión de navegador
 
-Fetches config from a Palo Alto firewall or Panorama over the PAN-OS XML
-API and:
+Mezcla de **PAN-helper v0.1** y **pan-audit-extension**, quedándose con lo
+mejor de cada uno. **Sin commit**: las únicas escrituras posibles son
+"Clonar y ajustar" (reglas `-AppID`) y "Depurar" (borrar objetos sin uso),
+ambas sobre la candidate config, sobre lo que el usuario marca y previa
+confirmación explícita. La extensión **no puede hacer commit** — revisar y
+hacer commit en la GUI es siempre manual.
 
-- **Audits** it for disabled rules, unused address/service objects,
-  possibly-shadowed rules, and best-practice gaps (any/any/any/any rules,
-  missing profiles, logging disabled, untagged rules).
-- **Optimizes** any/any/any/any rules: pulls a PAN-OS Custom Report scoped
-  to that rule, and generates either a narrower replacement rule or an
-  app-id backfill, as SET commands and/or a direct push to the *candidate*
-  config for you to review and commit.
+## Novedades de v0.2.5 (sobre v0.2.4)
 
-Everything runs client-side in the extension. Nothing is sent anywhere
-except the firewall/Panorama you point it at.
+Port de `Panorama/analizadorAppId-PanoramaConENV.py`: el módulo de hardening
+App-ID ahora funciona **también contra Panorama**, no solo contra firewalls.
 
-## Load it
+- **El formulario se adapta a la conexión.** Si eliges un Panorama, aparecen
+  sus campos propios y desaparece el de vsys:
+  - **Device group** — dónde viven las políticas a analizar (obligatorio
+    para clonar y ajustar).
+  - **Rulebase** — pre o post-rulebase, tanto para leer la regla original
+    como para crear la clonada (por defecto *post*, igual que el script).
+  - **Dispositivos (`device_name`)** — uno por línea, para acotar los logs a
+    firewalls concretos. Se traduce al mismo sub-filtro del script: uno solo
+    va directo, varios se combinan con `or` dentro de un paréntesis. Si lo
+    dejas vacío se consultan los logs de todos los equipos que reportan a
+    ese Panorama, y la consola lo advierte (dos device-groups con reglas
+    homónimas mezclarían sesiones).
+- **REST por device-group**: "Clonar y ajustar" usa
+  `location=device-group` y los recursos `SecurityPreRules` /
+  `SecurityPostRules` en Panorama, y sigue usando `location=vsys` con
+  `SecurityRules` en firewalls. El campo `@device-group` se descarta al
+  clonar, como en el script.
+- **Merge de aplicaciones nuevas** (portado de `procesar_politica`): si la
+  regla con sufijo ya existe, en vez de saltarla se comparan sus
+  aplicaciones actuales con las recién descubiertas. Si hay nuevas, se
+  actualiza con la unión (`PUT`); si no hay, no se toca. Sirve para volver a
+  correr el análisis semanas después y recoger lo que apareció entre tanto.
+  El resumen final distingue creadas / actualizadas / sin cambios.
+  **La regla original nunca se modifica**: el `PUT` solo se aplica a un
+  nombre que termina con el sufijo, y se verifica antes de llamar.
+- En Panorama los avisos recuerdan que hacen falta **commit a Panorama +
+  push al device-group**, ambos manuales.
 
-1. Go to `chrome://extensions`, enable **Developer mode** (top right).
-2. Click **Load unpacked**, select this folder.
-3. Click the extension icon → **Open Dashboard** or **Manage Connections**.
+Diferencia deliberada con el script de Panorama: sus `ALERT_APPS` son solo
+`{insufficient-data, unknown-p2p}`, lo que dejaría `unknown-tcp` y
+`unknown-udp` entrar en la regla. Aquí se mantiene el conjunto completo
+(`insufficient-data`, `unknown-tcp`, `unknown-udp`, `unknown-p2p`): esas
+apps se reportan como alerta y nunca se recomiendan.
 
-## Before you connect
+## Novedades de v0.2.4 (sobre v0.2.3)
 
-PAN-OS management interfaces almost always present a self-signed (or
-internal-CA) certificate. Chrome extensions can't click through a cert
-warning the way a regular tab can, so:
+- **"Depurar" en Objetos sin uso.** Cada fila de la pestaña tiene ahora un
+  checkbox, con "seleccionar todo" global y uno por sección (address-group,
+  service-group, address, service). El botón rojo **Depurar** elimina de la
+  **candidate config** solo los objetos marcados, tras un popup que lista
+  exactamente qué se va a borrar. Sin commit: revisar y confirmar en la GUI
+  es obligatorio (y un *revert* allí deshace todo si algo sale mal).
+- **Desvinculación automática**: si un objeto marcado pertenece a un grupo
+  que *no* vas a borrar, primero se le quita del grupo (`PUT`) y después se
+  elimina. Sin eso el firewall rechazaría el borrado por referencia.
+- **Orden seguro de borrado**: cuando el grupo también está marcado no hace
+  falta editarlo — se borra el grupo primero y luego sus miembros. El orden
+  se calcula por dependencias (contenedor antes que contenido), así que
+  también funciona con grupos anidados.
+- **Grupos que quedarían vacíos**: PAN-OS no admite un grupo estático sin
+  miembros. Si quitar lo marcado dejaría el grupo vacío y el grupo no está
+  marcado, esos objetos se omiten indicando que hay que marcar también el
+  grupo. Se detecta **antes** de tocar la red y el popup lo advierte.
+- El borrado va por REST (`Objects/Addresses`, `AddressGroups`, `Services`,
+  `ServiceGroups`) y respeta el ámbito real del objeto (shared, vsys o
+  device-group). El guard del cliente REST solo admite `PUT`/`DELETE` sobre
+  objetos: **nunca** puede modificar ni borrar una regla.
 
-1. Open `https://<firewall-or-panorama-ip>` in a normal tab once and accept
-   the certificate warning.
-2. *Then* add the target on the Connections page.
+## Novedades de v0.2.3 (sobre v0.2.2)
 
-If you skip this, "Connect & Save" fails with a network error even though
-the credentials are correct.
+- **"Clonar y ajustar"** (Fase 2 de `analizadorAppId-REST.py`, vía REST
+  API): la tabla de resultados del hardening ahora tiene un checkbox por
+  política; al pulsar el botón, para cada política marcada se clona la regla
+  original, se reemplaza `application` por las apps descubiertas (filtrando
+  otra vez ruido/alerta, como el script), se crea la regla nueva en la
+  **candidate config** y se mueve justo antes de la original. Si la regla ya
+  existe, se omite la creación y solo se intenta el move. La versión del
+  endpoint REST (`/restapi/vX.Y/`) se deriva sola de la versión de PAN-OS
+  guardada en la conexión. Solo firewalls (por vsys); las políticas sin apps
+  descubiertas tienen el checkbox deshabilitado.
+- **Seleccionar todo**: el checkbox de la cabecera marca de una vez todas
+  las políticas *clonables* — las que no aplican (sin apps que configurar)
+  quedan siempre fuera. Muestra estado intermedio si la selección es
+  parcial, y un contador junto al botón indica cuántas están marcadas y
+  cuántas no aplican.
+- **Sufijo configurable**: campo editable junto al botón, con `-AppID` por
+  defecto y una vista previa del nombre resultante. Se sanea a los
+  caracteres que PAN-OS admite en un nombre de regla, y si el nombre
+  original + sufijo supera los 63 caracteres, esa política se omite con un
+  mensaje claro en vez de dejar que el firewall rechace la escritura.
+- **Commit imposible por diseño.** Antes de escribir se pide confirmación
+  explícita, y el único archivo capaz de escribir
+  (`js/lib/panRestApi.js`) tiene un guard que rechaza cualquier endpoint
+  distinto de `Policies/SecurityRules` (crear/leer/move). No existe función,
+  endpoint ni parámetro de commit en toda la extensión: el commit se hace
+  manualmente en la GUI, previa revisión — obligatorio.
+- **Columna "Iteraciones" eliminada de la tabla** de resultados: el usuario
+  no la necesita para decidir. El dato sigue visible en la consola (por
+  regla) y en el CSV resumen.
+- El botón rojo "Cancelar llamadas" también aborta las llamadas REST del
+  clonado.
 
-## Firewall/Panorama-side requirements
+## Novedades de v0.2.2 (sobre v0.2.1)
 
-The account you connect with needs an **Admin Role Profile** with XML API
-access for at least: **Configuration** (read running/candidate config, and
-write if you'll use the Policy Optimizer's "push to candidate"),
-**Operational Requests** (keygen, show system info), and **Report** (the
-Policy Optimizer's traffic analysis). Palo Alto's recommended practice is a
-dedicated API service account rather than reusing a personal admin login.
+- **Hardening App-ID: descubrimiento iterativo exhaustivo** (port de
+  `analizadorAppId-REST.py`). Antes se tomaba una sola muestra de logs, y si
+  el tráfico estaba dominado por unas pocas aplicaciones, las minoritarias
+  quedaban por fuera. Ahora se consulta por **tandas de 1000 logs** negando
+  en la query las apps ya conocidas (`(app neq 'x') and (app neq 'y')...`)
+  hasta que una tanda llega vacía o sin apps nuevas — cada iteración solo
+  puede traer aplicaciones aún no vistas. Máximo 100 iteraciones por regla;
+  las reglas se procesan en secuencia, como el script original.
+- Ruido y alerta igual que el script: `incomplete` se niega desde la primera
+  tanda y nunca se recomienda; `insufficient-data` y `unknown-*` se reportan
+  aparte como alerta y nunca se recomiendan.
+- **Checkbox "Descargar CSV resumen"**: decides si al finalizar se descarga
+  el CSV (columnas Politica, Total Apps, Aplicaciones Recomendadas, Apps
+  Alerta, Iteraciones, Timestamp) o si los resultados quedan solo en
+  pantalla.
+- Lo que el script hacía como Fase 2 (crear la regla `-AppID` y moverla via
+  REST) **no se porta**: la extensión es de solo lectura. El entregable es
+  la lista de apps por regla.
 
-## How auth works
+## Novedades de v0.2.1 (sobre v0.2)
 
-1. You enter username + password once on the Connections page.
-2. The extension calls `type=keygen` to exchange them for an API key.
-3. Only the API key is stored (`chrome.storage.local`); the password is
-   discarded immediately after the keygen call.
-4. Every subsequent request uses the stored key.
-5. Everything (including keygen) is sent as a **POST** with the key/password
-   in the request body, not the URL — the first version of this project
-   used GET, which puts credentials in browser history and any web-server
-   access logs. Fixed.
+- **Objetos sin uso: evaluación en todo el firewall.** El uso ya no se mide
+  solo contra el rulebase de security: se evalúan también NAT (incluidas las
+  direcciones traducidas), decryption, QoS, PBF, authentication, DoS,
+  application-override, SD-WAN y tunnel-inspect con la misma semántica de
+  ámbitos y cascada de grupos; y como red de seguridad, un índice genérico
+  de toda la config marca como "en uso" cualquier objeto cuyo nombre
+  aparezca en otra parte (virtual routers, rutas estáticas, VPN/IKE,
+  GlobalProtect, interfaces...). Lo que queda listado como "sin uso" no
+  aparece en ningún otro lado del firewall — seguro de depurar. El barrido
+  genérico compara por nombre exacto y sin ámbitos, a propósito: ante la
+  duda, no recomienda borrar.
+- **Objetos duplicados: secciones + estado de uso.** La pestaña usa el mismo
+  patrón de índice clicable y secciones que "Objetos sin uso" (por criterio
+  y tipo), y cada objeto duplicado lleva su insignia **en uso** / **sin
+  uso** (la misma evaluación de arriba) para decidir cuál de los duplicados
+  se depura y cuál se conserva.
 
-Chrome prompts you to grant host permission for that specific hostname/IP
-the first time you connect (Manifest V3 requires this per-origin, at
-runtime — it can't be pre-baked for arbitrary customer firewalls).
+- **Nueva pestaña "Objetos duplicados"** en Auditoría, con dos criterios:
+  *por valor* (objetos distintos con el mismo contenido — misma IP/red/FQDN
+  o mismo protocolo/puerto — candidatos a consolidarse) y *por nombre* (el
+  mismo nombre definido en varios ámbitos, donde el más cercano tapa al
+  heredado).
+- **Corregido:** los services miembros de un service-group en uso se
+  marcaban como sin uso. Los service-groups llevan sus miembros en
+  `<members>`, no en `<static>` como los address-groups; ahora se leen
+  ambos (bug heredado de pan-audit-extension).
+- **Corregido:** al colapsar el menú se rompía todo el layout (la grilla
+  seguía definiendo 3 columnas con el menú fuera del flujo, y el contenido
+  caía en la columna de 18px).
+- **Corregido:** el botón "Auditar" quedaba con texto blanco sobre fondo
+  blanco (una regla más específica de la barra de controles pisaba el fondo
+  azul de `.primario`).
 
-## Using the dashboard
+- **Menú de módulos desplegable.** La franja `«` / `»` entre el menú y el
+  contenido lo oculta lateralmente para ampliar la zona de trabajo. El estado
+  se recuerda entre sesiones (`localStorage`).
+- **Botón rojo "Cancelar llamadas"** en la cabecera del Registro. Aborta de
+  inmediato toda llamada al firewall en vuelo — fetch en curso y esperas de
+  polling de logs — de cualquier módulo (auditoría, backups, hardening). La
+  ejecución termina con *"Operación cancelada por el usuario"* y los botones
+  se rehabilitan; las llamadas siguientes funcionan con normalidad.
+- **Objetos sin uso: índice por tipo.** Antes de las tablas hay chips
+  clicables (`address-group`, `service-group`, `address`, `service`) con el
+  conteo de cada tipo; al hacer clic se salta a esa sección. El motivo por
+  fila se resumió (p. ej. *"Sin uso porque el address-group 'X' al que
+  pertenece tampoco se usa."*) y la explicación del orden de eliminación
+  aparece una sola vez como nota de la pestaña.
 
-1. Toolbar icon → **Open Dashboard**.
-2. Pick a saved target and a config source:
-   - **Running config** — what's active/effective right now (includes
-     Panorama-pushed policy on a managed firewall).
-   - **Candidate config** — what's staged but not yet committed. Useful to
-     audit your own or someone else's in-progress changes before commit,
-     and it's also where the Policy Optimizer's "push" writes to.
-3. **Fetch & Audit**, then browse the tabs.
-4. **Export Findings (JSON/CSV)** to share the audit results, or
-   **Export Raw XML** to download the fetched config and do anything else
-   with it yourself outside the extension.
+## Qué se tomó de cada proyecto
 
-## Policy Optimizer
+De **pan-audit-extension**:
 
-For each any/any/any/any rule found, two actions are available:
+- **Conexiones guardadas**: usuario y contraseña se ingresan una sola vez;
+  se cambian por API key (`keygen`) y solo la key se guarda en
+  `chrome.storage.local`. Todos los módulos reutilizan la conexión — no se
+  vuelve a escribir la credencial.
+- **Auditoría**: reglas deshabilitadas, objetos sin uso, posibles sombras y
+  malas prácticas en las políticas (any/any, sin perfiles de seguridad, sin
+  log-end, sin tags).
+- **La interfaz**: navbar, dashboard con tarjetas de resumen, pestañas y
+  tablas, página de Conexiones.
 
-- **Narrow using report** — rewrites source, destination, application, and
-  service to only what was actually observed for that rule.
-- **Add App-ID using report** — leaves source/destination alone, adds the
-  observed applications, and switches service to `application-default`.
+De **PAN-helper v0.1**:
 
-Both generate a new rule named `<original>-narrowed` or `<original>-appid`
-(configurable suffix) rather than editing the original in place, so the old
-any/any/any/any rule stays until you're confident enough to disable or
-remove it — the same approach as the two GUI tools this was ported from.
+- **Módulo de backups** (configuración + device-state) — la lógica verificada
+  en producción, ahora sobre conexiones guardadas.
+- **Módulo de hardening App-ID** (recomendación de apps para
+  `application = any` a partir de logs de tráfico).
+- **La organización por módulos**: `js/modules/<nombre>.js` exporta una
+  función `(config, log, onProgreso) => Promise`; `js/dashboard.js` es el
+  único lugar que los registra.
+- **La consola de registro**, ahora con más detalle: el checkbox **Detalle**
+  muestra cada llamada a la API (tipo, acción, host), los ámbitos y conteos
+  del análisis, y los jobs de logs.
 
-### Setting up a Custom Report (one-time, per firewall/Panorama)
+## Qué se corrigió / eliminó a propósito
 
-The Optimizer deliberately does **not** guess at PAN-OS's internal summary
-database schema — instead it re-runs a report you build once in the GUI, ad
-hoc, scoped to one rule. To set one up:
+- **Sin Policy Optimizer.** Se eliminó la sección completa, incluida la única
+  función de escritura que existía (`setConfigNode`). No hay código capaz de
+  escribir en el equipo.
+- **Objetos sin uso en cascada.** Si un address no aparece en ninguna regla
+  pero es miembro de un address-group que a su vez está sin uso, el hallazgo
+  lo dice explícitamente: *"Sin uso porque el address-group 'X' al que
+  pertenece tampoco se usa. Eliminar primero el grupo y después este
+  objeto."* La tabla además se ordena con los grupos primero (el orden seguro
+  de eliminación) y marca estos casos con la insignia `en grupo sin uso`.
+  Borrar el miembro antes que el grupo produce error de referencia en el
+  firewall — por eso el aviso.
+- **Sin nombres de políticas reales en la UI.** Los placeholders son
+  genéricos (`rule-1`, `rule-2`); no queda información de clientes en el
+  código ni en la interfaz.
 
-1. On the firewall (or Panorama, if reporting on Panorama-visible logs):
-   **Monitor → Manage Custom Reports → Add**.
-2. Database: **Traffic Log** (or Traffic Summary, depending on version).
-3. Columns to include: at minimum **Source Address**, **Destination
-   Address**, **Application**, **Service/Port** — these are what the
-   Optimizer looks for (it matches column names case-insensitively against
-   a few common aliases; see `lib/policyGenerator.js`).
-4. Group by / sort however you like — the Optimizer just needs the rows.
-5. Save it with a name you'll remember (e.g. `rule-traffic-breakdown`).
-6. In the extension's Optimizer modal, enter that name and click
-   **List available** to confirm the container xpath is right (defaults to
-   `/config/shared/reports`; for a per-vsys report on a firewall use
-   `/config/devices/entry/vsys/entry[@name='vsys1']/reports` instead).
+## Modelo de escritura: sin commit, escritura mínima y explícita
 
-The Optimizer then re-runs that exact report definition ad hoc, adding a
-`query` filter of `(rule eq '<rule name>')` (plus `(device-group eq
-'<dg>')` on Panorama) and your chosen time period — so you get PAN-OS's own
-pre-aggregated numbers, fast, without pulling raw logs.
+Dos capas de red, cada una con su propia garantía:
 
-### Pushing changes
+- **`js/lib/panApi.js` (XML API)** — solo lectura estricta, sin cambios
+  desde v0.2: `verificarSoloLectura()` corre en todas las rutas y bloquea
+  `commit`/`import`/`user-id`, cualquier `config action` que no sea
+  `get`/`show`, y comandos operacionales de escritura. No exporta ninguna
+  función de escritura.
+- **`js/lib/panRestApi.js` (REST API)** — el único archivo que puede
+  escribir. Un guard de endpoint rechaza cualquier ruta distinta de
+  `Policies/Security{,Pre,Post}Rules` (GET/crear/actualizar/move) y
+  `Objects/{Addresses, AddressGroups, Services, ServiceGroups}`
+  (GET/PUT/DELETE). **`DELETE` solo se admite sobre objetos: ninguna regla
+  se elimina nunca.** El `PUT` sobre reglas existe solo para el merge de
+  aplicaciones, y el módulo verifica que el nombre lleve el sufijo antes de
+  llamarlo, así que la regla original nunca se modifica. Todo lo que escribe
+  queda en la **candidate config**. **No existe commit en ninguna parte de la
+  extensión**: revisar y hacer commit (y en Panorama, el push) en la GUI es
+  obligatorio y siempre manual.
 
-**Push new rule to candidate config** calls the config API's `action=set`
-against the exact rulebase xpath the audit found the original rule in. It:
+Las dos operaciones de escritura ("Clonar y ajustar" y "Depurar") solo
+corren tras una confirmación explícita, solo sobre lo que el usuario marcó,
+y el botón rojo "Cancelar llamadas" las aborta igual que al resto. "Depurar"
+además solo puede borrar objetos que la propia auditoría marcó como sin uso.
 
-- Only ever writes to the **candidate** config — never running, never
-  auto-committed. You still commit yourself, from the firewall/Panorama, on
-  your own schedule.
-- Only **adds** the new suffixed rule — it never touches or deletes the
-  original any/any/any/any rule.
-- Asks for an explicit confirmation before pushing.
+## Instalación
 
-If you'd rather not push via the API at all, copy the generated SET
-commands (or download them as `.txt`) and paste them into a CLI session or
-Panorama's config-mode terminal yourself — same output, your call on how
-it's applied.
+1. Abrir `chrome://extensions`
+2. Activar **Modo de desarrollador** (arriba a la derecha)
+3. **Cargar descomprimida** → seleccionar esta carpeta (`pan-helper-0.2.3`)
+4. Clic en el ícono → **Abrir dashboard** o **Administrar conexiones**
 
-## Known limitations (v1)
+## Antes de conectar: aceptar el certificado
 
-- Only the **security** rulebase is analyzed — NAT, decryption, QoS,
-  authentication rulebases aren't audited yet.
-- Panorama **templates** aren't walked (only device-group objects/rules).
-- Device-group hierarchy (needed so a child device-group can "see" a
-  parent's objects) is read from `/config/readonly/.../parent-dg`. If your
-  config export doesn't include that section, every device-group is
-  treated as a direct child of Shared — this only affects cross-device-
-  group unused-object detection, not per-device-group rule auditing.
-- Dynamic address groups (tag-based) can't be resolved statically, so
-  their members are never flagged as "unused" — intentional, to avoid
-  false positives.
-- Shadow detection is a heuristic (same-or-broader `any` fields + same
-  action). Treat every "possibly shadowed" result as a lead to check
-  manually, not a verdict.
-- The Policy Optimizer's report-column matching assumes reasonably standard
-  column names (source/destination/application/service). If your report
-  uses very different naming, adjust `COLUMN_ALIASES` in
-  `lib/policyGenerator.js`.
-- There's no CSV-import fallback in this version (the two GUI tools this
-  was ported from supported loading a Traffic Report CSV directly) — the
-  live report pull was prioritized since PAN-OS's own summarization is
-  faster than client-side CSV parsing. Re-adding a CSV path as an
-  alternative input to `summarizeRows()` in `lib/policyGenerator.js` would
-  be a small, self-contained addition if you still want it as a fallback
-  for environments where Custom Reports aren't practical.
+Los equipos usan certificado autofirmado y una extensión no puede saltarse la
+advertencia. Por cada equipo nuevo, una vez:
 
-## Architecture notes
+1. Abrir `https://<ip-del-equipo>` en una pestaña normal
+2. **Configuración avanzada → Acceder a \<ip\> (no seguro)**
+3. Volver a la página de Conexiones y conectar
 
-- `lib/panApi.js` — XML API client (keygen, running/candidate config,
-  set-config, ad hoc report jobs). All POST, all credentials out of the URL.
-- `lib/auditEngine.js` — pure config-XML analysis, no UI or network
-  dependencies. This is also where rulebase xpaths get computed, since the
-  Optimizer needs them to push changes back to the right location.
-- `lib/policyGenerator.js` — turns report rows into a suggested rule
-  (as SET commands and as pushable XML). No PAN-OS calls in this file.
-- `lib/store.js` — `chrome.storage.local` target persistence.
-- `lib/navbar.js` — the one place the nav's markup/behavior lives; both
-  `dashboard.html` and `options.html` include it with a single
-  `<script src="lib/navbar.js" type="module">` tag, so editing the nav
-  once updates both pages. It also live-refreshes the target-count badge
-  via `chrome.storage.onChanged` — the same mechanism `dashboard.js` and
-  `options.js` use to refresh their own target dropdown/list without
-  needing a manual reload when a target is added elsewhere.
+Chrome pedirá permiso de host para esa IP/FQDN concreta la primera vez
+(Manifest V3 lo exige por origen, en tiempo de ejecución).
+
+## Requisitos del lado del equipo
+
+La cuenta usada necesita un **Admin Role Profile** con acceso XML API a:
+**Configuration** (lectura), **Operational Requests** (keygen, show system
+info) y **Log** (el módulo de hardening consulta logs de tráfico). Para usar
+**"Clonar y ajustar"** necesita además acceso **REST API → Policies →
+Security Rules** con escritura, y para **"Depurar"**, **REST API → Objects**
+(Addresses / Address Groups / Services / Service Groups) con escritura. Toda
+escritura queda en candidate; el commit es manual. Si solo vas a
+auditar/respaldar, una cuenta de solo lectura basta.
+
+## Módulos
+
+### Auditoría
+
+Descarga la configuración (**running** = lo activo, incluye lo empujado por
+Panorama; **candidate** = staged sin commit) y la analiza por completo en el
+navegador:
+
+| Pestaña | Qué muestra |
+|---|---|
+| Reglas deshabilitadas | Toda regla con `disabled = yes`, por ámbito y rulebase |
+| Objetos sin uso | Address/service/grupos no referenciados, **con motivo en cascada**, en orden seguro de eliminación y con checkbox + botón **Depurar** |
+| Posibles sombras | Heurística: regla anterior con todo en `any` y misma acción — verificar a mano |
+| Buenas prácticas | any/any en allow, sin perfiles de seguridad, log-end deshabilitado, sin tags |
+
+Exporta hallazgos (JSON/CSV) y el XML crudo a
+`Descargas/PAN-Helper/auditoria/`.
+
+Limitaciones: las pestañas de reglas deshabilitadas, sombras y buenas
+prácticas siguen analizando solo el rulebase de *security* (la evaluación de
+uso de objetos sí cubre todas las políticas y el resto de la config); los
+templates de Panorama no se recorren; los address-groups dinámicos (por tag)
+no se marcan nunca como sin uso.
+
+### Backups
+
+Marca los equipos guardados y descarga `configuration` (XML) y
+`device-state` (tgz) a `Descargas/PAN-Helper/AAAA/Mes/DD/`. Hasta 4 equipos
+en paralelo.
+
+### Hardening App-ID (firewall y Panorama)
+
+Analiza **exactamente** las políticas que indiques (textarea o CSV con
+columna `Rule` — se vuelca al textarea para revisión), en secuencia.
+
+Según la conexión elegida el formulario pide lo propio de cada plataforma:
+
+| | Firewall | Panorama |
+|---|---|---|
+| Ubicación de las reglas | vsys | device group + pre/post-rulebase |
+| Filtro de logs | `vsys` (opcional) | `device_name` (opcional, uno por línea) |
+| Recurso REST | `SecurityRules` | `SecurityPreRules` / `SecurityPostRules` |
+| Al terminar | commit manual | commit a Panorama + push al device-group, manuales |
+
+Descubrimiento **iterativo y exhaustivo** (port de
+`analizadorAppId-REST.py`): cada iteración pide una tanda de hasta 1000 logs
+con el filtro `(rule eq ...) and (receive_time geq ...) and (action eq
+'allow')` más una negación `(app neq '...')` por cada aplicación ya
+conocida. La iteración termina cuando una tanda llega vacía o sin apps
+nuevas — por eso ninguna aplicación queda por fuera aunque el tráfico esté
+dominado por unas pocas.
+
+El resumen se muestra en pantalla (Politica, Total Apps, Aplicaciones
+Recomendadas, Apps Alerta) con un checkbox por política y el botón **Clonar
+y ajustar** (ver novedades de v0.2.3); si el checkbox de CSV está marcado,
+se descarga el resumen en `Descargas/PAN-Helper/hardening/` (el CSV sí
+conserva la columna Iterations, como el script original).
+
+Parámetros en `js/modules/hardening.js`:
+
+| Constante | Valor | Efecto |
+|---|---|---|
+| `NLOGS_POR_TANDA` | 1000 | logs por iteración |
+| `MAX_ITERACIONES` | 100 | salvaguarda por regla |
+| `APLICACIONES_RUIDO` | incomplete | negada desde la 1.ª tanda, nunca se recomienda |
+| `APLICACIONES_ALERTA` | insufficient-data, unknown-tcp/udp/p2p | se reportan aparte, nunca se recomiendan |
+
+## Estructura
+
+```
+manifest.json            Manifest V3 (storage + downloads; host permissions opcionales)
+popup.html / popup.js    Menú del ícono: dashboard / conexiones
+dashboard.html           Dashboard con los tres módulos + consola
+connections.html         Alta y gestión de conexiones (también es la options page)
+navbar.html              Markup de la barra (compartido por ambas páginas)
+css/
+  nav.css                Estilos de la barra
+  app.css                Estilos del dashboard
+js/
+  dashboard.js           Shell: cablea UI con módulos (único registro de módulos)
+  connections.js         Lógica de la página de conexiones
+  lib/
+    panApi.js            Cliente XML API — solo lectura estricta (candado)
+    panRestApi.js        Cliente REST — única escritura: reglas -AppID y borrado de objetos; sin commit
+    auditEngine.js       Análisis puro del XML (sin red, sin UI)
+    xmlUtils.js          Ayudas DOMParser
+    store.js             Persistencia de conexiones (solo API keys)
+    util.js              Concurrencia, CSV, descargas, rutas por fecha
+    navbar.js            Inyección de navbar + contador en vivo
+  modules/
+    audit.js             Módulo de auditoría
+    depuracion.js        Borrado de objetos sin uso (orden seguro + pre-chequeo)
+    backups.js           Módulo de backups
+    hardening.js         Módulo de hardening App-ID
+```
+
+### Agregar un módulo nuevo
+
+1. Crear `js/modules/<nombre>.js` que exporte una función
+   `(config, log, onProgreso) => Promise`.
+2. Usar solo `js/lib/panApi.js` para la red — no reimplementar keygen ni
+   fetch propios (el candado de solo lectura vive ahí).
+3. Agregar la sección en `dashboard.html` y cablearla en `js/dashboard.js`.
+
+## Notas técnicas heredadas (trampas conocidas)
+
+1. **`chrome.permissions.request()` exige gesto de usuario vivo.** Se invoca
+   en `connections.js` dentro del handler del clic, antes de cualquier
+   `await`. No mover esa llamada.
+2. **`type=export` va por GET, no POST.** El endpoint no acepta POST de forma
+   consistente entre versiones de PAN-OS (verificado en producción por el
+   módulo de backups de v0.1). Todo lo demás va por POST con la key en el
+   cuerpo, fuera de la URL.
+3. Detección de error en export: solo se inspeccionan respuestas < 4 KB; una
+   config válida se devuelve tal cual.
+4. Las consultas de log son asíncronas (job + poll hasta `FIN`); en v0.2 van
+   por POST. Si algún equipo con PAN-OS antiguo rechazara el POST del log
+   API, cambiar `queryLogs` a GET como hacía v0.1.

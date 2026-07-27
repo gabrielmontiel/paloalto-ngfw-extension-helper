@@ -1,0 +1,81 @@
+﻿<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>PAN Helper v0.2.5 — Conexiones</title>
+  <link rel="stylesheet" href="css/nav.css" />
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; color: #1a1a1a; background: #f6f7f9; }
+    .page { max-width: 640px; margin: 32px auto; padding: 0 16px; }
+    h1 { font-size: 18px; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 16px; margin-bottom: 16px; background: white; }
+    label { display: block; font-size: 12px; color: #555; margin: 10px 0 4px; }
+    input { width: 100%; padding: 7px 9px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; box-sizing: border-box; }
+    .row { display: flex; gap: 10px; }
+    .row > div { flex: 1; }
+    button { padding: 8px 14px; border-radius: 6px; border: 1px solid #1a5fb4; background: #1a5fb4; color: white; cursor: pointer; font-size: 13px; margin-top: 14px; }
+    button:hover { background: #164e94; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    button.secondary { background: white; color: #b41a1a; border-color: #b41a1a; }
+    button.secondary:hover { background: #fdf0f0; }
+    .target { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #eee; padding: 10px 0; }
+    .target:last-child { border-bottom: none; }
+    .target .meta { font-size: 12px; color: #666; }
+    .status { font-size: 12px; margin-top: 8px; }
+    .status.error { color: #b41a1a; }
+    .status.ok { color: #1a7d3a; }
+    .note { font-size: 12px; color: #666; background: #f7f7f7; border-radius: 8px; padding: 10px 12px; margin-bottom: 16px; line-height: 1.5; }
+    .note strong { color: #1a1a1a; }
+  </style>
+</head>
+<body>
+  <div id="navbar-root"></div>
+  <div class="page">
+  <h1>Conexiones</h1>
+  <div class="note">
+    <strong>Certificados autofirmados:</strong> antes de conectar, abre <code>https://&lt;host&gt;</code>
+    en una pestana normal una vez y acepta la advertencia del certificado — si no, la conexion
+    falla con error de red aunque las credenciales sean correctas.<br /><br />
+    La contrasena se usa una sola vez para pedir la API key (<code>type=keygen</code>) y no se
+    guarda; solo se almacena la API key resultante. Los modulos del dashboard reutilizan esa
+    key: no vuelves a escribir credenciales.
+  </div>
+
+  <div class="card">
+    <h2 style="font-size:14px;margin:0 0 4px;">Agregar firewall o Panorama</h2>
+    <label for="label">Etiqueta (la que quieras, p. ej. "FW Sede Principal")</label>
+    <input id="label" placeholder="FW Sede Principal" />
+    <div class="row">
+      <div>
+        <label for="host">IP o FQDN</label>
+        <input id="host" placeholder="10.0.0.1 o panorama.midominio.com" />
+      </div>
+      <div style="max-width:100px;">
+        <label for="port">Puerto</label>
+        <input id="port" placeholder="443" value="443" />
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="username">Usuario</label>
+        <input id="username" autocomplete="off" />
+      </div>
+      <div>
+        <label for="password">Contrasena</label>
+        <input id="password" type="password" autocomplete="off" />
+      </div>
+    </div>
+    <button id="connectBtn">Conectar y guardar</button>
+    <div id="status" class="status"></div>
+  </div>
+
+  <div class="card">
+    <h2 style="font-size:14px;margin:0 0 4px;">Conexiones guardadas</h2>
+    <div id="targetList"></div>
+  </div>
+  </div>
+
+  <script src="js/lib/navbar.js" type="module"></script>
+  <script src="js/connections.js" type="module"></script>
+</body>
+</html>
