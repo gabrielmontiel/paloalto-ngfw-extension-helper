@@ -140,17 +140,38 @@ export async function listReportDefinitions(baseUrl, apiKey, containerXpath) {
   return children(container, "entry").map((e) => entryName(e));
 }
 
-// Submits an ad hoc dynamic report job. definitionEntryEl is the <entry>
-// fetched by getReportDefinition (its <type> child is reused verbatim —
-// that's the part encoding which summary database and columns to use).
-// query/period/topn override whatever the saved definition had, scoping
-// this specific run to one rule and one time window.
-export async function submitAdHocReport(baseUrl, apiKey, definitionEntryEl, { query, period, topn }) {
-  const typeEl = child(definitionEntryEl, "type");
-  if (!typeEl) throw new Error("Report definition has no <type> element to reuse.");
+// Builds the <type> element for a traffic-summary report grouped by rule,
+// with exactly the columns the Policy Optimizer needs. This lets the
+// extension run the report *itself* (as a dynamic ad hoc job) instead of
+// requiring you to pre-build and name a saved Custom Report in the GUI.
+//
+// <trsum> is the traffic-summary database; <aggregate-by> are the group-by
+// columns (returned as row tags: rule/src/dst/app/dport — the same names
+// policyGenerator's COLUMN_ALIASES already match), and <values> are the
+// numeric aggregates PAN-OS needs to have at least one of. Kept as a single
+// self-contained function so it's easy to tweak per PAN-OS version.
+export function trafficSummaryReportTypeXml() {
+  return (
+    "<type><trsum>" +
+    "<aggregate-by>" +
+    "<member>rule</member>" +
+    "<member>src</member>" +
+    "<member>dst</member>" +
+    "<member>app</member>" +
+    "<member>dport</member>" +
+    "</aggregate-by>" +
+    "<values><member>sessions</member><member>bytes</member></values>" +
+    "</trsum></type>"
+  );
+}
 
+// Submits an ad hoc dynamic report job from a raw <type> XML string. This is
+// the core used both by the app-built report (trafficSummaryReportTypeXml)
+// and by submitAdHocReport (which reuses a saved definition's <type>).
+// query/period/topn scope this specific run.
+export async function submitAdHocReportFromType(baseUrl, apiKey, typeXml, { query, period, topn }) {
   const cmd =
-    typeEl.outerHTML +
+    typeXml +
     `<period>${escapeXml(period || "last-7-days")}</period>` +
     `<topn>${Number(topn) || 100}</topn>` +
     `<topm>${Number(topn) || 100}</topm>` +
@@ -166,6 +187,15 @@ export async function submitAdHocReport(baseUrl, apiKey, definitionEntryEl, { qu
   const jobId = result.querySelector("job")?.textContent?.trim();
   if (!jobId) throw new Error("Report submission did not return a job ID.");
   return jobId;
+}
+
+// Submits an ad hoc dynamic report job reusing a saved definition's <type>
+// (fetched by getReportDefinition). Kept for callers that still want to point
+// at a hand-built Custom Report instead of the app-built one.
+export async function submitAdHocReport(baseUrl, apiKey, definitionEntryEl, opts) {
+  const typeEl = child(definitionEntryEl, "type");
+  if (!typeEl) throw new Error("Report definition has no <type> element to reuse.");
+  return submitAdHocReportFromType(baseUrl, apiKey, typeEl.outerHTML, opts);
 }
 
 export async function getReportJobResult(baseUrl, apiKey, jobId) {
