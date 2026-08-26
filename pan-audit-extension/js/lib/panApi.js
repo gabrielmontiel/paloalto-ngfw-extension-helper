@@ -1,4 +1,4 @@
-﻿// js/lib/panApi.js
+// js/lib/panApi.js
 // Cliente PAN-OS / Panorama. Mezcla del panApi.js de pan-audit-extension
 // (funciones que reciben baseUrl + apiKey, todo por POST) con el candado de
 // solo lectura de panos.js de PAN-helper.
@@ -96,6 +96,11 @@ const ACCIONES_ESCRITURA = new Set([
 
 const TIPOS_PROHIBIDOS = new Set(["commit", "import", "user-id"]);
 
+// Contenedores de Custom Reports: lo unico que se puede escribir por la via
+// de configuracion. Cubre shared y los reports por vsys, nada mas.
+const XPATH_REPORTES_ESCRIBIBLE =
+  /^\/config\/(shared|devices\/entry(\[[^\]]*\])?\/vsys\/entry\[@name='[^']*'\])\/reports(\/.*)?$/;
+
 export class OperacionBloqueadaError extends Error {
   constructor(message) {
     super(message);
@@ -116,9 +121,16 @@ export function verificarSoloLectura(params) {
   }
 
   if (tipo === "config" && accion !== "get" && accion !== "show") {
+    // UNICA excepcion al candado: guardar la definicion de un Custom Report.
+    // Se limita por xpath a los contenedores de reports (shared o vsys) y
+    // solo admite 'set'. No alcanza a politicas, objetos ni nada mas, y
+    // sigue sin existir commit: lo escrito queda en la candidate config.
+    if (accion === "set" && XPATH_REPORTES_ESCRIBIBLE.test(String(params.xpath || ""))) {
+      return;
+    }
     throw new OperacionBloqueadaError(
       `Operacion bloqueada: config action='${accion || "(vacia)"}' no es de lectura. ` +
-        `PAN Helper v0.2 es de solo lectura.`
+        `La unica escritura permitida por esta via es guardar un Custom Report.`
     );
   }
 
@@ -297,6 +309,244 @@ export async function exportFile(baseUrl, apiKey, category) {
   }
 
   return blob;
+}
+
+// ---------------------------------------------------------------------------
+//  Custom reports (fuente alternativa para el hardening App-ID)
+//
+//  En vez de recorrer los logs crudos, se puede reutilizar un Custom Report
+//  ya creado en el equipo. Los reportes utiles para esto son de tipo
+//  Traffic Summary (trsum) agregados por regla y aplicacion, p. ej.:
+//
+//    set shared reports <nombre> type trsum sortby sessions
+//    set shared reports <nombre> type trsum aggregate-by [ rule app dport dst src ]
+//    set shared reports <nombre> period last-90-calendar-days
+//    set shared reports <nombre> topn 100
+//    set shared reports <nombre> topm 25
+//    set shared reports <nombre> caption <nombre>
+//
+//  La extension NO crea el reporte (eso es escritura de configuracion, que
+//  el candado prohibe): lo lee, reutiliza su definicion y lo corre ad hoc.
+//  Para crearlo, el dashboard genera los comandos SET para copiar y pegar.
+//
+//  Todas las llamadas de esta seccion son de lectura: type=config&action=get
+//  para la definicion y type=report para ejecutarlo.
+// ---------------------------------------------------------------------------
+
+/** Contenedor por defecto de los Custom Reports (los del ejemplo son shared). */
+export const XPATH_REPORTES_SHARED = "/config/shared/reports";
+
+const escXml = (s) =>
+  String(s).replace(/[<>&'"]/g, (c) =>
+    ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;" }[c])
+  );
+
+/**
+ * <type> de un reporte Traffic Summary agregado por regla y aplicacion:
+ * el equivalente XML de
+ *   set ... type trsum sortby sessions
+ *   set ... type trsum aggregate-by [ rule app dport dst src ]
+ */
+export function construirTypeTrsum(agregarPor = ["rule", "app", "dport", "dst", "src"]) {
+  const miembros = agregarPor.map((m) => `<member>${escXml(m)}</member>`).join("");
+  return (
+    "<type><trsum>" +
+    "<sortby>sessions</sortby>" +
+    `<aggregate-by>${miembros}</aggregate-by>` +
+    "</trsum></type>"
+  );
+}
+
+/**
+ * Query que acota el reporte a un conjunto de politicas:
+ *   (rule eq 'pol-1') or (rule eq 'pol-2')
+ * Devuelve null si no hay politicas (reporte sin filtro de regla).
+ */
+export function construirQueryReglas(reglas) {
+  const lista = (reglas || []).map((r) => String(r).replace(/'/g, "").trim()).filter(Boolean);
+  if (!lista.length) return null;
+  return lista.map((r) => `(rule eq '${r}')`).join(" or ");
+}
+
+/**
+ * Guarda (o sobreescribe) la definicion de un Custom Report en la CANDIDATE
+ * config, con la misma forma que producen los comandos SET del CLI.
+ *
+ * ESTA ES LA UNICA ESCRITURA DE CONFIGURACION DE TODO panApi.js, y el
+ * candado la limita por xpath a los contenedores de reports. NO hace commit:
+ * la definicion queda en candidate y hay que commitearla en la GUI para que
+ * aparezca de forma permanente en Monitor > Manage Custom Reports.
+ *
+ * Ejecutar el reporte NO requiere esto: ejecutarReporteAdHoc() corre la
+ * definicion al vuelo. Guardarla sirve para dejar rastro y poder reutilizarla
+ * desde la GUI.
+ */
+export async function guardarDefinicionReporte(baseUrl, apiKey, opciones = {}) {
+  const {
+    nombre,
+    containerXpath = XPATH_REPORTES_SHARED,
+    periodo = "last-90-calendar-days",
+    topn = 500,
+    topm = 25,
+    query = null,
+    agregarPor,
+  } = opciones;
+
+  if (!nombre) throw new Error("Falta el nombre del reporte a guardar.");
+
+  const element =
+    `<entry name="${escXml(nombre)}">` +
+    construirTypeTrsum(agregarPor) +
+    `<period>${escXml(periodo)}</period>` +
+    `<topn>${Number(topn) || 500}</topn>` +
+    `<topm>${Number(topm) || 25}</topm>` +
+    `<caption>${escXml(nombre)}</caption>` +
+    (query ? `<query>${escXml(query)}</query>` : "") +
+    `</entry>`;
+
+  trace(`Guardando definicion del reporte '${nombre}' en ${containerXpath}.`);
+
+  return apiCall(baseUrl, {
+    type: "config",
+    action: "set",
+    xpath: containerXpath,
+    element,
+    key: apiKey,
+  });
+}
+
+/** Nombres de los Custom Reports guardados en un contenedor. */
+export async function listarReportes(baseUrl, apiKey, containerXpath = XPATH_REPORTES_SHARED) {
+  const contenedor = await getConfig(baseUrl, apiKey, containerXpath);
+  if (!contenedor) return [];
+  return Array.from(contenedor.children)
+    .filter((e) => e.tagName === "entry")
+    .map((e) => e.getAttribute("name"))
+    .filter(Boolean);
+}
+
+/** Definicion completa de un Custom Report (elemento <entry>). */
+export async function obtenerDefinicionReporte(
+  baseUrl, apiKey, nombre, containerXpath = XPATH_REPORTES_SHARED
+) {
+  const xpath = `${containerXpath}/entry[@name='${String(nombre).replace(/'/g, "")}']`;
+  const entry = await getConfig(baseUrl, apiKey, xpath);
+  if (!entry) {
+    throw new Error(
+      `No se encontro el Custom Report '${nombre}' en ${containerXpath}. ` +
+        `Verifica el nombre y el contenedor (shared vs vsys).`
+    );
+  }
+  return entry;
+}
+
+/**
+ * Resume una definicion para mostrarla antes de ejecutarla: base de datos,
+ * columnas de agregacion, periodo, topn/topm y query embebida.
+ */
+export function describirReporte(entry) {
+  const hijo = (el, tag) => Array.from(el?.children || []).find((c) => c.tagName === tag) || null;
+  const texto = (el) => (el ? el.textContent.trim() : "");
+
+  const tipoEl = hijo(entry, "type");
+  // El primer hijo de <type> es la base de datos: trsum, thsum, appstat...
+  const baseEl = tipoEl ? tipoEl.firstElementChild : null;
+
+  return {
+    nombre: entry.getAttribute("name"),
+    base: baseEl ? baseEl.tagName : null,
+    agregadoPor: baseEl
+      ? Array.from(hijo(baseEl, "aggregate-by")?.children || []).map((m) => m.textContent.trim())
+      : [],
+    ordenadoPor: texto(hijo(baseEl, "sortby")),
+    periodo: texto(hijo(entry, "period")),
+    topn: texto(hijo(entry, "topn")),
+    topm: texto(hijo(entry, "topm")),
+    query: texto(hijo(entry, "query")),
+    typeXml: tipoEl ? tipoEl.outerHTML : null,
+  };
+}
+
+/**
+ * Ejecuta un reporte ad hoc reutilizando el <type> de una definicion
+ * guardada. Los parametros opcionales sobreescriben los de la definicion
+ * solo para esta corrida; el reporte guardado no se modifica.
+ *
+ * @returns {string} job-id
+ */
+export async function ejecutarReporteAdHoc(baseUrl, apiKey, typeXml, opciones = {}) {
+  if (!typeXml) throw new Error("La definicion del reporte no tiene elemento <type>.");
+
+  const { periodo, topn, topm, query } = opciones;
+  const esc = (s) =>
+    String(s).replace(/[<>&'"]/g, (c) =>
+      ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;" }[c])
+    );
+
+  let cmd = typeXml;
+  if (periodo) cmd += `<period>${esc(periodo)}</period>`;
+  if (topn) cmd += `<topn>${Number(topn) || 100}</topn>`;
+  if (topm) cmd += `<topm>${Number(topm) || 25}</topm>`;
+  if (query) cmd += `<query>${esc(query)}</query>`;
+
+  const result = await apiCall(baseUrl, {
+    type: "report",
+    reporttype: "dynamic",
+    reportname: "pan-helper-adhoc",
+    cmd,
+    key: apiKey,
+  });
+
+  const jobId = result?.querySelector("job")?.textContent?.trim();
+  if (!jobId) throw new Error("La ejecucion del reporte no devolvio job-id.");
+  trace(`Reporte enviado; job ${jobId}.`);
+  return jobId;
+}
+
+/**
+ * Poll de un job de reporte hasta que termina. Devuelve las filas como
+ * objetos planos, con las columnas que haya definido el reporte.
+ */
+export async function esperarReporte(baseUrl, apiKey, jobId, opciones = {}) {
+  const { intervaloMs = 2000, maxIntentos = 60, onEspera = null } = opciones;
+
+  for (let intento = 1; intento <= maxIntentos; intento++) {
+    const result = await apiCall(baseUrl, {
+      type: "report",
+      action: "get",
+      "job-id": jobId,
+      key: apiKey,
+    });
+
+    const status = result?.querySelector("job > status")?.textContent?.trim();
+
+    // Cuando termina, segun la version de PAN-OS las filas cuelgan de
+    // <report> o directamente de <result>. Se aceptan ambas formas.
+    if (!status || status === "FIN") {
+      const entradas =
+        result.querySelectorAll("report > entry").length
+          ? result.querySelectorAll("report > entry")
+          : result.querySelectorAll(":scope > entry");
+
+      if (!status && !entradas.length) continue; // aun sin datos; reintentar
+
+      const filas = Array.from(entradas).map((e) => {
+        const fila = {};
+        for (const col of e.children) fila[col.tagName] = col.textContent.trim();
+        return fila;
+      });
+      trace(`Job ${jobId} terminado: ${filas.length} fila(s) de reporte.`);
+      return filas;
+    }
+
+    if (onEspera) onEspera(intento, maxIntentos);
+    await esperar(intervaloMs, senalActual());
+  }
+
+  throw new Error(
+    `El reporte (job ${jobId}) no termino tras ${maxIntentos} intentos. ` +
+      `Reduce el periodo o el topn del reporte.`
+  );
 }
 
 // ---------------------------------------------------------------------------

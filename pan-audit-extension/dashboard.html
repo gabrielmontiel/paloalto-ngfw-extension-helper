@@ -1,8 +1,8 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <title>PAN Helper v0.2.5 — Dashboard</title>
+  <title>PAN Helper v0.2.6 — Dashboard</title>
   <link rel="stylesheet" href="css/nav.css" />
   <link rel="stylesheet" href="css/app.css" />
 </head>
@@ -123,19 +123,21 @@
       <section id="modulo-hardening" class="modulo">
         <h2>Hardening de reglas con App-ID <span class="etiqueta-plataforma">firewall / Panorama</span></h2>
         <p class="descripcion">
-          Descubre las aplicaciones realmente usadas por cada regla de forma
-          <strong>exhaustiva</strong>: consulta los logs permitidos por tandas
-          de 1000, negando en la query las apps ya conocidas
-          (<code>app neq</code>) hasta que no aparecen nuevas. Recomienda que
-          aplicaciones reemplazarian <code>application = any</code>.
+          Descubre las aplicaciones realmente usadas por cada regla y recomienda
+          cuales reemplazarian <code>application = any</code>. Dos fuentes:
+          <strong>logs</strong> (tandas de 1000 negando las apps ya vistas —
+          exhaustivo pero lento) o <strong>Custom Report</strong> (<code>trsum</code>
+          agregado por regla y app — rapido y con periodos largos, aunque el
+          <code>topn</code> limita la muestra).
         </p>
 
         <p class="aviso-lectura">
-          El analisis es de solo lectura (consulta logs de trafico). La unica
-          escritura posible es <strong>Clonar y ajustar</strong>: crea reglas
-          <code>-AppID</code> en la candidate config para las politicas que
-          marques, previa confirmacion. Nunca hace commit — revisar y hacer
-          commit en la GUI es obligatorio.
+          El analisis es de solo lectura. Hay dos escrituras posibles, ambas
+          previa confirmacion y siempre en la candidate config:
+          <strong>Clonar y ajustar</strong> (crea las reglas <code>-AppID</code>
+          de las politicas que marques) y, si activas la casilla,
+          <strong>guardar la definicion del Custom Report</strong>. Nunca hace
+          commit — revisar y commitear en la GUI es obligatorio.
         </p>
 
         <form id="form-hardening">
@@ -193,14 +195,30 @@
           </fieldset>
 
           <fieldset>
+            <legend>Fuente de datos</legend>
+            <div class="fila">
+              <div>
+                <label for="h-fuente">De donde se descubren las aplicaciones</label>
+                <select id="h-fuente">
+                  <option value="logs" selected>Logs (iterativo, exhaustivo)</option>
+                  <option value="reporte">Custom Report (rapido, periodo largo)</option>
+                </select>
+              </div>
+              <div>
+                <p class="nota-campo" id="h-fuente-nota"></p>
+              </div>
+            </div>
+          </fieldset>
+
+          <fieldset>
             <legend>Politicas a analizar</legend>
-            <p class="nota">
+            <p class="nota" id="h-nota-politicas">
               Se analizan exactamente las politicas que indiques aqui. El
               programa no lee el rulebase ni elige reglas por su cuenta.
             </p>
 
             <label for="h-reglas">Nombres de politica, uno por linea</label>
-            <textarea id="h-reglas" rows="7" required
+            <textarea id="h-reglas" rows="7"
                       placeholder="rule-1&#10;rule-2&#10;rule-3"></textarea>
 
             <div class="carga-csv">
@@ -213,7 +231,88 @@
             </div>
           </fieldset>
 
-          <fieldset>
+          <!-- Solo con fuente = Custom Report -->
+          <fieldset id="h-bloque-reporte" class="oculto">
+            <legend>Custom Report</legend>
+            <div class="fila">
+              <div>
+                <label for="h-reporte-modo">Modo</label>
+                <select id="h-reporte-modo">
+                  <option value="auto" selected>Generarlo con las politicas indicadas</option>
+                  <option value="existente">Usar un reporte ya creado</option>
+                </select>
+              </div>
+              <div>
+                <p class="nota-campo" id="h-reporte-modo-nota"></p>
+              </div>
+            </div>
+
+            <div class="fila">
+              <div>
+                <label for="h-reporte">Nombre del reporte</label>
+                <div class="fila-inline">
+                  <input type="text" id="h-reporte" placeholder="PAN-Helper-AppID">
+                  <button type="button" id="h-btn-listar" class="secundario">Listar</button>
+                </div>
+                <p class="nota-campo" id="h-reporte-nota"></p>
+              </div>
+              <div>
+                <label for="h-reporte-contenedor">Contenedor</label>
+                <select id="h-reporte-contenedor">
+                  <option value="/config/shared/reports" selected>Shared</option>
+                  <option value="vsys">Vsys del equipo</option>
+                </select>
+                <p class="nota-campo">
+                  Donde se busca (o se guarda) la definicion. Los comandos
+                  <code>set shared reports</code> usan Shared.
+                </p>
+              </div>
+            </div>
+
+            <label class="check" id="h-guardar-def-wrap">
+              <input type="checkbox" id="h-guardar-def">
+              Guardar tambien la definicion en el equipo
+            </label>
+            <p class="nota-campo" id="h-guardar-def-nota">
+              Sin marcar, el reporte se ejecuta al vuelo y <strong>no se escribe nada</strong>
+              en el firewall. Marcado, la definicion se guarda en la
+              <strong>candidate config</strong> para que aparezca en Monitor &gt; Manage
+              Custom Reports — eso requiere que hagas <strong>commit manual</strong>;
+              la extension nunca commitea.
+            </p>
+
+            <div class="fila">
+              <div>
+                <label for="h-reporte-periodo">Periodo (opcional)</label>
+                <select id="h-reporte-periodo">
+                  <option value="" selected>El del reporte</option>
+                  <option value="last-7-calendar-days">last-7-calendar-days</option>
+                  <option value="last-30-calendar-days">last-30-calendar-days</option>
+                  <option value="last-90-calendar-days">last-90-calendar-days</option>
+                </select>
+              </div>
+              <div>
+                <label for="h-reporte-topn">Top N (opcional)</label>
+                <input type="number" id="h-reporte-topn" min="10" max="5000" step="10"
+                       placeholder="el del reporte">
+                <p class="nota-campo">
+                  Limita las filas: una app muy minoritaria puede quedar fuera.
+                </p>
+              </div>
+            </div>
+
+            <div class="carga-csv">
+              <button type="button" id="h-btn-comandos" class="secundario">
+                Ver comandos SET para crear el reporte
+              </button>
+              <span class="nota-inline">
+                Para pegarlos en una sesion CLI en modo <code>configure</code>.
+              </span>
+            </div>
+            <textarea id="h-comandos" class="comandos oculto" rows="7" readonly></textarea>
+          </fieldset>
+
+          <fieldset id="h-bloque-logs">
             <legend>Analisis</legend>
             <div class="fila">
               <div>
@@ -230,7 +329,11 @@
                 </p>
               </div>
             </div>
-            <label class="check" style="margin-top:10px;">
+          </fieldset>
+
+          <fieldset>
+            <legend>Salida</legend>
+            <label class="check">
               <input type="checkbox" id="h-csv-resumen" checked>
               Descargar CSV resumen al finalizar
               (<code>Descargas/PAN-Helper/hardening/</code>)

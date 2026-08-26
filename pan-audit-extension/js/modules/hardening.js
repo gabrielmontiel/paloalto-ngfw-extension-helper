@@ -30,7 +30,20 @@
 // usuario, en el orden en que las indica; se clonan EXACTAMENTE las que
 // marca, previa confirmacion.
 
-import { baseUrlFor, getSystemInfo, queryLogs } from "../lib/panApi.js";
+import {
+  baseUrlFor,
+  getSystemInfo,
+  queryLogs,
+  listarReportes,
+  obtenerDefinicionReporte,
+  describirReporte,
+  ejecutarReporteAdHoc,
+  esperarReporte,
+  construirTypeTrsum,
+  construirQueryReglas,
+  guardarDefinicionReporte,
+  XPATH_REPORTES_SHARED,
+} from "../lib/panApi.js";
 import {
   obtenerReglaSecurity,
   crearReglaSecurity,
@@ -322,6 +335,447 @@ export async function ejecutarHardening(config, log, onProgreso) {
   for (const a of alertas) log(a, "warn");
 
   log(`Finalizado. ${resumen.length} regla(s) analizada(s), ${alertas.length} alerta(s).`, "ok");
+
+  return { resumen, alertas };
+}
+
+// ===========================================================================
+//  FUENTE ALTERNATIVA: Custom Reports
+//
+//  En vez de recorrer los logs crudos, se reutiliza un Custom Report de tipo
+//  Traffic Summary (trsum) agregado por regla y aplicacion. Ventajas: PAN-OS
+//  ya tiene los datos pre-agregados (mucho mas rapido que iterar logs) y el
+//  periodo puede ser mucho mas largo (last-90-calendar-days sin problema).
+//
+//  A cambio, la muestra la define el reporte: `topn` limita las filas, asi
+//  que una aplicacion muy minoritaria puede quedar fuera. Por eso ambas
+//  fuentes conviven: el reporte para barridos amplios y rapidos, la
+//  iteracion de logs para exhaustividad sobre pocas reglas.
+// ===========================================================================
+
+// Columnas que puede traer el reporte segun como se definio el aggregate-by.
+// Se comparan en minusculas para no depender de la version de PAN-OS.
+const COLUMNA_REGLA = ["rule", "rulename", "rule-name", "name"];
+const COLUMNA_APP = ["app", "application"];
+const COLUMNA_SESIONES = ["sessions", "nsess", "count"];
+
+function valorDeColumna(fila, alias) {
+  for (const clave of Object.keys(fila)) {
+    if (alias.includes(clave.toLowerCase())) return fila[clave];
+  }
+  return null;
+}
+
+/** True si las filas permiten atribuir trafico por regla. */
+export function tieneColumnaRegla(filas) {
+  return filas.some((f) => valorDeColumna(f, COLUMNA_REGLA) !== null);
+}
+
+/**
+ * Agrupa las filas del reporte por regla y devuelve, para cada una, las
+ * aplicaciones observadas (separando ruido y alerta igual que la via de
+ * logs) y el total de sesiones.
+ *
+ * Exportada para poder probarla sin red.
+ *
+ * @param {Array<Object>} filas
+ * @param {string[]|null} reglasFiltro  si se indica, solo esas politicas
+ * @returns {Map<string, {apps:Set, alerta:Set, sesiones:number}>}
+ */
+export function agruparReportePorRegla(filas, reglasFiltro = null) {
+  const permitidas = reglasFiltro?.length ? new Set(reglasFiltro) : null;
+  const porRegla = new Map();
+
+  for (const fila of filas) {
+    const regla = valorDeColumna(fila, COLUMNA_REGLA);
+    const app = valorDeColumna(fila, COLUMNA_APP);
+    if (!regla || !app) continue;
+    if (permitidas && !permitidas.has(regla)) continue;
+
+    if (!porRegla.has(regla)) {
+      porRegla.set(regla, { apps: new Set(), alerta: new Set(), sesiones: 0 });
+    }
+    const acc = porRegla.get(regla);
+
+    const nombreApp = String(app).trim();
+    if (nombreApp && !APLICACIONES_RUIDO.has(nombreApp)) {
+      if (APLICACIONES_ALERTA.has(nombreApp)) acc.alerta.add(nombreApp);
+      else acc.apps.add(nombreApp);
+    }
+
+    const sesiones = Number(valorDeColumna(fila, COLUMNA_SESIONES));
+    if (Number.isFinite(sesiones)) acc.sesiones += sesiones;
+  }
+
+  return porRegla;
+}
+
+/**
+ * Comandos SET para crear en el equipo un Custom Report con la forma que
+ * este modulo espera. La extension no los ejecuta (crear un reporte es
+ * escritura de configuracion, que el candado prohibe): se muestran para
+ * copiarlos a una sesion CLI en modo configure.
+ */
+export function comandosSetReporte(opciones = {}) {
+  const {
+    nombre = "PAN-Helper-AppID",
+    periodo = "last-90-calendar-days",
+    topn = 100,
+    topm = 25,
+    query = "",
+    contenedor = "shared",
+  } = opciones;
+
+  const base = `set ${contenedor} reports ${nombre}`;
+  const lineas = [
+    `${base} type trsum sortby sessions`,
+    `${base} type trsum aggregate-by [ rule app dport dst src ]`,
+    `${base} period ${periodo}`,
+    `${base} topn ${topn}`,
+    `${base} topm ${topm}`,
+    `${base} caption ${nombre}`,
+  ];
+  if (query) lineas.push(`${base} query "${String(query).replace(/"/g, "'")}"`);
+  return lineas.join("\n");
+}
+
+/** Nombres de los Custom Reports disponibles en el equipo. */
+export async function listarReportesDisponibles(target, containerXpath) {
+  return listarReportes(baseUrlFor(target), target.apiKey, containerXpath || XPATH_REPORTES_SHARED);
+}
+
+/**
+ * Descubre las aplicaciones por politica a partir de un Custom Report.
+ *
+ * @param {{target, reporte: string, containerXpath?: string,
+ *          reglas?: string[]|null, periodo?: string|null,
+ *          topn?: number|null, descargarCsv?: boolean}} config
+ *        `reglas` es opcional: si se indica, filtra el resultado a esas
+ *        politicas; si se omite, se reportan todas las que traiga el
+ *        reporte (util cuando la query ya las acota).
+ * @returns {{resumen: Array, alertas: Array, descripcion: object}}
+ */
+export async function ejecutarHardeningDesdeReporte(config, log, onProgreso) {
+  const { target, reporte, containerXpath, reglas, periodo, topn, descargarCsv } = config;
+
+  if (!reporte) throw new Error("Indica el nombre del Custom Report a leer.");
+
+  const baseUrl = baseUrlFor(target);
+  const contenedor = containerXpath || XPATH_REPORTES_SHARED;
+
+  const info = await getSystemInfo(baseUrl, target.apiKey);
+  const nombreEquipo = nombreSeguro(info.devicename || info.hostname || target.host);
+  log(`Conectado a ${nombreEquipo} (${info.model}, PAN-OS ${info.swVersion}).`, "ok");
+  log("Modo solo lectura: el reporte se ejecuta ad hoc, no se modifica su definicion.", "ok");
+
+  // --- 1. Definicion del reporte ---
+  log(`Leyendo la definicion de '${reporte}' en ${contenedor}...`);
+  const entry = await obtenerDefinicionReporte(baseUrl, target.apiKey, reporte, contenedor);
+  const desc = describirReporte(entry);
+
+  log(
+    `Reporte '${desc.nombre}': base=${desc.base || "?"}, ` +
+      `agregado por [${desc.agregadoPor.join(", ") || "?"}], ` +
+      `periodo=${desc.periodo || "?"}, topn=${desc.topn || "?"}, topm=${desc.topm || "?"}.`
+  );
+  if (desc.query) log(`Query del reporte: ${desc.query}`, "debug");
+
+  if (desc.base && desc.base !== "trsum") {
+    log(
+      `El reporte usa la base '${desc.base}'. Este modulo espera 'trsum' ` +
+        `(Traffic Summary); si no trae columnas rule y app, no se podra atribuir el trafico.`,
+      "warn"
+    );
+  }
+  for (const requerida of ["rule", "app"]) {
+    if (desc.agregadoPor.length && !desc.agregadoPor.includes(requerida)) {
+      log(
+        `El reporte no agrega por '${requerida}'. Agregalo con: ` +
+          `set shared reports ${desc.nombre} type trsum aggregate-by [ rule app dport dst src ]`,
+        "warn"
+      );
+    }
+  }
+
+  onProgreso(1, 3);
+
+  // --- 2. Ejecucion ad hoc ---
+  const periodoEfectivo = periodo || desc.periodo || null;
+  log(
+    `Ejecutando el reporte ad hoc` +
+      (periodoEfectivo ? ` (periodo ${periodoEfectivo})` : "") +
+      `. La definicion guardada no se modifica.`
+  );
+
+  const jobId = await ejecutarReporteAdHoc(baseUrl, target.apiKey, desc.typeXml, {
+    periodo: periodoEfectivo,
+    topn: topn || desc.topn,
+    topm: desc.topm,
+    query: desc.query,
+  });
+
+  const filas = await esperarReporte(baseUrl, target.apiKey, jobId, {
+    onEspera: (intento) => {
+      if (intento % 5 === 0) log(`  esperando al equipo (${intento})...`);
+    },
+  });
+
+  onProgreso(2, 3);
+
+  if (!filas.length) {
+    log(
+      "El reporte no devolvio filas. Puede que no haya trafico en el periodo, " +
+        "o que la query del reporte no coincida con ninguna politica.",
+      "warn"
+    );
+    return { resumen: [], alertas: [], descripcion: desc };
+  }
+
+  log(`${filas.length} fila(s) recibidas. Columnas: ${Object.keys(filas[0]).join(", ")}.`, "debug");
+
+  if (!tieneColumnaRegla(filas)) {
+    throw new Error(
+      "El reporte no trae columna de regla, asi que no se puede atribuir el trafico por " +
+        "politica. Recrealo con 'aggregate-by [ rule app dport dst src ]'."
+    );
+  }
+
+  // --- 3. Agrupacion por politica ---
+  const porRegla = agruparReportePorRegla(filas, reglas);
+  log(`${porRegla.size} politica(s) con trafico en el reporte.`);
+
+  if (reglas?.length) {
+    const ausentes = reglas.filter((r) => !porRegla.has(r));
+    if (ausentes.length) {
+      log(
+        `Sin trafico en el reporte para: ${ausentes.join(", ")}. ` +
+          `Revisa que la query del reporte las incluya y que el periodo las cubra.`,
+        "warn"
+      );
+    }
+  }
+
+  const resumen = [];
+  const alertas = [];
+
+  for (const [regla, datos] of [...porRegla.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const apps = [...datos.apps].sort();
+    resumen.push({
+      Politica: regla,
+      "Total Apps": apps.length,
+      "Aplicaciones Recomendadas": apps.join(" ") || "N/A",
+      "Apps Alerta": [...datos.alerta].sort().join(" "),
+      Sesiones: datos.sesiones,
+      Origen: `report:${desc.nombre}`,
+      Timestamp: fechaPanOs(new Date()),
+      _apps: apps,
+    });
+
+    if (!apps.length) {
+      alertas.push(`[ADVERTENCIA] '${regla}': el reporte no dejo ninguna aplicacion recomendable.`);
+    }
+    for (const a of [...datos.alerta].sort()) {
+      alertas.push(
+        `[ADVERTENCIA] '${regla}': trafico '${a}' detectado. Revision manual ` +
+          `(SSL decryption, App-ID cloud) antes de cerrar la politica.`
+      );
+    }
+
+    log(
+      `${regla}: ${apps.length} app(s) recomendadas, ${datos.sesiones} sesion(es)` +
+        (datos.alerta.size ? `, ${datos.alerta.size} de alerta.` : "."),
+      apps.length ? "ok" : "warn"
+    );
+  }
+
+  // --- exportacion opcional ---
+  if (descargarCsv && resumen.length) {
+    const marca = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+    const ruta = `${CARPETA_RAIZ}/hardening/${nombreEquipo}_${marca}_reporte.csv`;
+    await descargarTexto(aCsv(resumen.map(({ _apps, ...resto }) => resto)), ruta);
+    log(`CSV resumen en Descargas/${ruta}`, "ok");
+  }
+
+  for (const a of alertas) log(a, "warn");
+
+  log(
+    `Finalizado desde reporte. ${resumen.length} politica(s), ${alertas.length} alerta(s). ` +
+      `Recuerda: el topn del reporte limita la muestra.`,
+    "ok"
+  );
+
+  onProgreso(3, 3);
+  return { resumen, alertas, descripcion: desc };
+}
+
+/**
+ * Flujo completo automatico: arma el reporte con las politicas indicadas,
+ * opcionalmente lo guarda en el equipo, lo ejecuta y devuelve las apps por
+ * politica listas para clonar.
+ *
+ * Sobre "crear el reporte":
+ *  - Para OBTENER LOS DATOS no hace falta crear nada. El reporte se ejecuta
+ *    ad hoc (reporttype=dynamic) con la definicion armada al vuelo, y eso
+ *    funciona sin commit.
+ *  - `guardarDefinicion: true` ademas escribe la definicion en la CANDIDATE
+ *    config para que quede visible en Monitor > Manage Custom Reports. Esa
+ *    escritura necesita un COMMIT MANUAL para persistir; la extension no lo
+ *    hace. Si vuelves a ejecutar con el mismo nombre, se sobreescribe.
+ *
+ * @param {{target, reglas: string[], nombreReporte?, containerXpath?,
+ *          periodo?, topn?, guardarDefinicion?, descargarCsv?}} config
+ */
+export async function ejecutarHardeningAutoReporte(config, log, onProgreso) {
+  const {
+    target,
+    reglas,
+    nombreReporte = "PAN-Helper-AppID",
+    containerXpath = XPATH_REPORTES_SHARED,
+    periodo = "last-90-calendar-days",
+    topn = 500,
+    guardarDefinicion = false,
+    descargarCsv = false,
+  } = config;
+
+  if (!reglas?.length) {
+    throw new Error(
+      "Indica al menos una politica: el reporte se construye filtrando por sus nombres."
+    );
+  }
+
+  const baseUrl = baseUrlFor(target);
+  const totalPasos = guardarDefinicion ? 4 : 3;
+  let paso = 0;
+
+  const info = await getSystemInfo(baseUrl, target.apiKey);
+  const nombreEquipo = nombreSeguro(info.devicename || info.hostname || target.host);
+  log(`Conectado a ${nombreEquipo} (${info.model}, PAN-OS ${info.swVersion}).`, "ok");
+
+  // --- 1. Construccion de la definicion ---
+  const query = construirQueryReglas(reglas);
+  const typeXml = construirTypeTrsum();
+
+  log(`Reporte armado para ${reglas.length} politica(s): ${reglas.join(", ")}.`);
+  log(`Query: ${query}`, "debug");
+  log(`Periodo ${periodo}, topn ${topn}, agregado por rule/app/dport/dst/src.`);
+  onProgreso(++paso, totalPasos);
+
+  // --- 2. Guardado opcional de la definicion (unica escritura de config) ---
+  if (guardarDefinicion) {
+    log(
+      `Guardando la definicion como '${nombreReporte}' en ${containerXpath} ` +
+        `(candidate config)...`,
+      "warn"
+    );
+    await guardarDefinicionReporte(baseUrl, target.apiKey, {
+      nombre: nombreReporte,
+      containerXpath,
+      periodo,
+      topn,
+      topm: 25,
+      query,
+    });
+    log(
+      `'${nombreReporte}' guardado. Queda en la CANDIDATE config: haz commit en la GUI ` +
+        `para que aparezca de forma permanente en Monitor > Manage Custom Reports.`,
+      "ok"
+    );
+    onProgreso(++paso, totalPasos);
+  }
+
+  // --- 3. Ejecucion ad hoc (no depende del guardado ni del commit) ---
+  log("Ejecutando el reporte...");
+  const jobId = await ejecutarReporteAdHoc(baseUrl, target.apiKey, typeXml, {
+    periodo,
+    topn,
+    topm: 25,
+    query,
+  });
+
+  const filas = await esperarReporte(baseUrl, target.apiKey, jobId, {
+    onEspera: (intento) => {
+      if (intento % 5 === 0) log(`  esperando al equipo (${intento})...`);
+    },
+  });
+  onProgreso(++paso, totalPasos);
+
+  if (!filas.length) {
+    log(
+      "El reporte no devolvio filas. Puede que esas politicas no tengan trafico en el " +
+        "periodo, o que los nombres no coincidan exactamente con los del rulebase.",
+      "warn"
+    );
+    return { resumen: [], alertas: [] };
+  }
+
+  log(`${filas.length} fila(s) recibidas. Columnas: ${Object.keys(filas[0]).join(", ")}.`, "debug");
+
+  if (!tieneColumnaRegla(filas)) {
+    throw new Error(
+      "El reporte no devolvio columna de regla; no se puede atribuir el trafico por " +
+        "politica. Puede ser una diferencia de esta version de PAN-OS con trsum."
+    );
+  }
+
+  // --- 4. Agrupacion ---
+  const porRegla = agruparReportePorRegla(filas, reglas);
+  const resumen = [];
+  const alertas = [];
+
+  const ausentes = reglas.filter((r) => !porRegla.has(r));
+  if (ausentes.length) {
+    log(
+      `Sin trafico en el reporte para: ${ausentes.join(", ")}. Verifica el nombre exacto ` +
+        `de la politica y que haya trafico permitido en el periodo.`,
+      "warn"
+    );
+  }
+
+  for (const [regla, datos] of [...porRegla.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const apps = [...datos.apps].sort();
+    resumen.push({
+      Politica: regla,
+      "Total Apps": apps.length,
+      "Aplicaciones Recomendadas": apps.join(" ") || "N/A",
+      "Apps Alerta": [...datos.alerta].sort().join(" "),
+      Sesiones: datos.sesiones,
+      Origen: guardarDefinicion ? `report:${nombreReporte}` : "report:ad-hoc",
+      Timestamp: fechaPanOs(new Date()),
+      _apps: apps,
+    });
+
+    if (!apps.length) {
+      alertas.push(`[ADVERTENCIA] '${regla}': el reporte no dejo ninguna aplicacion recomendable.`);
+    }
+    for (const a of [...datos.alerta].sort()) {
+      alertas.push(
+        `[ADVERTENCIA] '${regla}': trafico '${a}' detectado. Revision manual ` +
+          `(SSL decryption, App-ID cloud) antes de cerrar la politica.`
+      );
+    }
+
+    log(
+      `${regla}: ${apps.length} app(s) recomendadas, ${datos.sesiones} sesion(es)` +
+        (datos.alerta.size ? `, ${datos.alerta.size} de alerta.` : "."),
+      apps.length ? "ok" : "warn"
+    );
+  }
+
+  if (descargarCsv && resumen.length) {
+    const marca = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+    const ruta = `${CARPETA_RAIZ}/hardening/${nombreEquipo}_${marca}_reporte.csv`;
+    await descargarTexto(aCsv(resumen.map(({ _apps, ...resto }) => resto)), ruta);
+    log(`CSV resumen en Descargas/${ruta}`, "ok");
+  }
+
+  for (const a of alertas) log(a, "warn");
+
+  log(
+    `Finalizado. ${resumen.length} politica(s) con datos. Revisa las apps y usa ` +
+      `"Clonar y ajustar" para crear las reglas endurecidas. Recuerda que el topn ` +
+      `(${topn}) limita la muestra.`,
+    "ok"
+  );
 
   return { resumen, alertas };
 }

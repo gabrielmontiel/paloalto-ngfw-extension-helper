@@ -223,6 +223,19 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--azul); outl
   margin: 0 0 16px; line-height: 1.5;
 }
 
+.fila-inline { display: flex; gap: 8px; align-items: center; }
+.fila-inline input[type=text] { flex: 1; min-width: 0; }
+.fila-inline .secundario { white-space: nowrap; }
+
+textarea.comandos {
+  margin-top: 10px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  background: #10151b;
+  color: #d5dbe2;
+  border-color: #2a3340;
+}
+
 .carga-csv {
   margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--borde);
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;

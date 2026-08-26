@@ -1,11 +1,59 @@
-# PAN Helper v0.2.5 — extensión de navegador
+# PAN Helper v0.2.6 — extensión de navegador
 
 Mezcla de **PAN-helper v0.1** y **pan-audit-extension**, quedándose con lo
 mejor de cada uno. **Sin commit**: las únicas escrituras posibles son
 "Clonar y ajustar" (reglas `-AppID`) y "Depurar" (borrar objetos sin uso),
-ambas sobre la candidate config, sobre lo que el usuario marca y previa
+y —desde v0.2.6— guardar la definición de un Custom Report. Las tres van
+sobre la candidate config, sobre lo que el usuario marca y previa
 confirmación explícita. La extensión **no puede hacer commit** — revisar y
 hacer commit en la GUI es siempre manual.
+
+## Novedades de v0.2.6 (sobre v0.2.5)
+
+El módulo de hardening App-ID puede obtener las aplicaciones desde un
+**Custom Report** (`trsum`), además de la vía de logs que ya existía. Un
+selector **Fuente de datos** elige entre las dos.
+
+- **Generar el reporte con las políticas indicadas** (modo por defecto). La
+  extensión arma la definición filtrando por los nombres que escribas
+  (`(rule eq 'p1') or (rule eq 'p2')`), la ejecuta y lee el resultado, que
+  alimenta la misma tabla con checkboxes y el botón **Clonar y ajustar**.
+  Por defecto **no escribe nada en el equipo**: el reporte se corre *ad hoc*,
+  lo que no requiere ni guardado ni commit.
+- **Guardar también la definición** (casilla opcional). Persiste el reporte
+  en la candidate config para que aparezca en *Monitor > Manage Custom
+  Reports*. Pide confirmación explícita y avisa de que el commit es manual.
+- **Reutilizar un reporte ya creado.** Lee su definición, la ejecuta *ad hoc*
+  y nunca la modifica. El botón **Listar** enumera los del equipo.
+- **Ver comandos SET** genera los comandos CLI equivalentes, por si prefieres
+  crear el reporte a mano en modo `configure`.
+- Validaciones: `rule` y `app` en el `aggregate-by` son obligatorios para
+  poder atribuir el tráfico por política — se avisa antes de ejecutar si
+  faltan y se falla con un mensaje accionable si las filas no traen columna
+  de regla. Se aceptan alias de columnas (`Rule`/`Application`).
+
+### El candado, ahora con una excepción
+
+Guardar la definición implica un `config action=set`, así que
+`verificarSoloLectura()` deja de ser un "no" absoluto. La excepción es
+quirúrgica: solo `set`, y solo si el xpath cae dentro de un contenedor de
+reports (`/config/shared/reports` o el equivalente por vsys). Siguen
+bloqueados `set` sobre objetos y reglas, sobre `/config/shared` a secas,
+sobre xpaths que solo empiezan parecido (`/config/shared/reportsfoo`),
+`delete` incluso dentro de reports, y por supuesto `commit`. Hay pruebas
+para cada uno de esos casos.
+
+### Compromiso entre fuentes
+
+| | Logs (iterativo) | Custom Report |
+|---|---|---|
+| Exhaustividad | total | limitada por el `topn` |
+| Velocidad | lenta | rápida (datos ya agregados) |
+| Periodo | según retention de logs | largo (90 días) sin problema |
+
+El `topn` por defecto subió a 500 (el ejemplo del CLI usa 100, que se queda
+corto al analizar varias políticas a la vez). Para exhaustividad total sobre
+pocas reglas, la vía de logs sigue siendo la que no se salta ninguna app.
 
 ## Novedades de v0.2.5 (sobre v0.2.4)
 
@@ -223,11 +271,16 @@ De **PAN-helper v0.1**:
 
 Dos capas de red, cada una con su propia garantía:
 
-- **`js/lib/panApi.js` (XML API)** — solo lectura estricta, sin cambios
-  desde v0.2: `verificarSoloLectura()` corre en todas las rutas y bloquea
+- **`js/lib/panApi.js` (XML API)** — lectura estricta con **una sola
+  excepción**: guardar la definición de un Custom Report.
+  `verificarSoloLectura()` corre en todas las rutas y bloquea
   `commit`/`import`/`user-id`, cualquier `config action` que no sea
-  `get`/`show`, y comandos operacionales de escritura. No exporta ninguna
-  función de escritura.
+  `get`/`show`, y comandos operacionales de escritura. La excepción admite
+  únicamente `action=set` cuyo xpath caiga dentro de un contenedor de
+  reports (`/config/shared/reports` o el equivalente por vsys): no alcanza a
+  políticas, objetos ni nada más, `delete` sigue bloqueado incluso ahí, y
+  sigue sin existir commit. Está cubierta por pruebas que verifican tanto lo
+  que permite como lo que rechaza.
 - **`js/lib/panRestApi.js` (REST API)** — el único archivo que puede
   escribir. Un guard de endpoint rechaza cualquier ruta distinta de
   `Policies/Security{,Pre,Post}Rules` (GET/crear/actualizar/move) y
@@ -306,6 +359,51 @@ Marca los equipos guardados y descarga `configuration` (XML) y
 en paralelo.
 
 ### Hardening App-ID (firewall y Panorama)
+
+Dos fuentes de datos, seleccionables en el formulario:
+
+| | Logs (iterativo) | Custom Report |
+|---|---|---|
+| Cómo obtiene las apps | tandas de 1000 logs negando las ya vistas | reejecuta un report `trsum` ya creado |
+| Exhaustividad | total: no se escapa ninguna app | limitada por el `topn` del reporte |
+| Velocidad | lenta (muchas consultas por regla) | rápida (PAN-OS ya tiene los datos agregados) |
+| Periodo | lo que aguante el retention de logs | largo sin problema (90 días) |
+| Lista de políticas | obligatoria | opcional (la query del reporte ya acota) |
+
+**Custom Report.** Dos modos:
+
+- **Generarlo con las políticas indicadas** (por defecto). La extensión arma
+  la definición `trsum` filtrando por los nombres que escribas
+  (`(rule eq 'p1') or (rule eq 'p2')`), la ejecuta y lee el resultado. **No
+  escribe nada en el equipo**: el reporte se corre *ad hoc*, que no requiere
+  ni guardado ni commit. Opcionalmente, la casilla **Guardar también la
+  definición en el equipo** la persiste en la candidate config para que
+  aparezca en *Monitor > Manage Custom Reports* — eso sí necesita **commit
+  manual** tuyo, y pide confirmación antes de escribir.
+- **Usar un reporte ya creado.** Lee el que exista, reutiliza su `<type>` y
+  lo ejecuta *ad hoc* sin modificar la definición. El botón **Listar**
+  enumera los del equipo.
+
+En ambos modos, **Ver comandos SET** genera lo que habría que pegar en una
+sesión CLI en modo `configure`, por si prefieres crearlo a mano:
+
+```
+set shared reports <nombre> type trsum sortby sessions
+set shared reports <nombre> type trsum aggregate-by [ rule app dport dst src ]
+set shared reports <nombre> period last-90-calendar-days
+set shared reports <nombre> topn 100
+set shared reports <nombre> topm 25
+set shared reports <nombre> caption <nombre>
+```
+
+`rule` y `app` en el `aggregate-by` son **obligatorios**: sin ellos no se
+puede atribuir el tráfico a cada política. La extensión avisa antes de
+ejecutar si faltan, y falla con un mensaje accionable si las filas no traen
+columna de regla. Si el reporte lleva su propia `query` (para acotar a las
+políticas de interés), se respeta tal cual.
+
+En ambos casos el resultado alimenta la misma tabla con checkboxes y el
+botón **Clonar y ajustar**.
 
 Analiza **exactamente** las políticas que indiques (textarea o CSV con
 columna `Rule` — se vuelca al textarea para revisión), en secuencia.

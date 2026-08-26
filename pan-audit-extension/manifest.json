@@ -1,14 +1,14 @@
-﻿{
+{
   "manifest_version": 3,
-  "name": "PAN Helper v0.2.5",
-  "version": "0.2.5",
+  "name": "PAN Helper v0.2.6",
+  "version": "0.2.6",
   "description": "Auditoria, backups y hardening para PAN-OS / Panorama. Sin commit: la unica escritura posible es clonar reglas -AppID cuando el usuario lo pide; el commit siempre es manual. Las conexiones se guardan como API key; nunca se almacenan contrasenas.",
 
   "options_page": "connections.html",
 
   "action": {
     "default_popup": "popup.html",
-    "default_title": "PAN Helper v0.2"
+    "default_title": "PAN Helper v0.2.6"
   },
 
   "permissions": [

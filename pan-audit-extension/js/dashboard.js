@@ -8,7 +8,14 @@ import { setApiLogger, cancelarTodo } from "./lib/panApi.js";
 import { reglasDesdeCsv, aCsv, descargarTexto } from "./lib/util.js";
 import { ejecutarAuditoria } from "./modules/audit.js";
 import { ejecutarBackups } from "./modules/backups.js";
-import { ejecutarHardening, clonarYAjustar } from "./modules/hardening.js";
+import {
+  ejecutarHardening,
+  ejecutarHardeningDesdeReporte,
+  ejecutarHardeningAutoReporte,
+  listarReportesDisponibles,
+  comandosSetReporte,
+  clonarYAjustar,
+} from "./modules/hardening.js";
 import { depurarObjetos, planificarDepuracion } from "./modules/depuracion.js";
 
 const $ = (id) => document.getElementById(id);
@@ -766,9 +773,41 @@ $("form-hardening").addEventListener("submit", async (evento) => {
     ),
   ];
 
-  if (!reglas.length) {
-    log("Indica al menos una politica a analizar.", "error");
+  const desdeReporte = $("h-fuente").value === "reporte";
+  const modoAuto = desdeReporte && $("h-reporte-modo").value === "auto";
+
+  // La lista de politicas es obligatoria salvo en un caso: reutilizar un
+  // reporte existente, cuya propia query ya las acota.
+  if (!reglas.length && !(desdeReporte && !modoAuto)) {
+    log(
+      modoAuto
+        ? "Indica las politicas: el reporte se construye filtrando por sus nombres."
+        : "Indica al menos una politica a analizar.",
+      "error"
+    );
     return;
+  }
+  if (desdeReporte && !modoAuto && !$("h-reporte").value.trim()) {
+    log("Indica el nombre del Custom Report a leer.", "error");
+    return;
+  }
+
+  // Guardar la definicion escribe en la candidate config: se confirma.
+  if (modoAuto && $("h-guardar-def").checked) {
+    const nombre = $("h-reporte").value.trim() || "PAN-Helper-AppID";
+    const ok = confirm(
+      `Se guardara la definicion del reporte "${nombre}" en la CANDIDATE config de ` +
+        `${target.host}.\n\n` +
+        `Es la unica escritura de configuracion que hace la extension, y queda limitada ` +
+        `a los Custom Reports: no toca politicas ni objetos.\n\n` +
+        `NO se hara commit — para que el reporte quede permanente en Monitor > Manage ` +
+        `Custom Reports debes commitear tu mismo en la GUI.\n\n` +
+        `Los datos del analisis se obtienen igual aunque no lo guardes.\n\n¿Continuar?`
+    );
+    if (!ok) {
+      log("Guardado del reporte cancelado. Marca/desmarca la casilla y reintenta.");
+      return;
+    }
   }
 
   const esPanorama = /panorama/i.test(target.platform || "");
@@ -778,20 +817,10 @@ $("form-hardening").addEventListener("submit", async (evento) => {
     return;
   }
 
-  const config = {
-    target,
-    reglas,
-    dias: Number($("h-dias").value),
-    descargarCsv: $("h-csv-resumen").checked,
+  const ubicacion = {
     vsys: esPanorama ? null : $("h-vsys").value.trim() || null,
     deviceGroup: esPanorama ? $("h-devicegroup").value.trim() : null,
     rulebase: esPanorama ? $("h-rulebase").value : null,
-    dispositivos: esPanorama
-      ? $("h-dispositivos")
-          .value.split("\n")
-          .map((d) => d.trim())
-          .filter(Boolean)
-      : null,
   };
 
   const btn = $("h-btn");
@@ -801,17 +830,66 @@ $("form-hardening").addEventListener("submit", async (evento) => {
   $("h-resultado").innerHTML = "";
 
   try {
-    const { resumen } = await ejecutarHardening(config, log, (hechos, total) => {
-      $("h-progreso").textContent = `${hechos} / ${total} reglas`;
-    });
-    // "Clonar y ajustar" actua sobre el mismo equipo y ubicacion del analisis.
-    renderResumenHardening({
-      target,
-      vsys: config.vsys,
-      deviceGroup: config.deviceGroup,
-      rulebase: config.rulebase,
-      resumen,
-    });
+    let resumen;
+
+    const onPaso = (hechos, total) => {
+      $("h-progreso").textContent = `paso ${hechos} / ${total}`;
+    };
+
+    if (modoAuto) {
+      ({ resumen } = await ejecutarHardeningAutoReporte(
+        {
+          target,
+          reglas,
+          nombreReporte: $("h-reporte").value.trim() || "PAN-Helper-AppID",
+          containerXpath: xpathContenedorReportes(ubicacion.vsys),
+          periodo: $("h-reporte-periodo").value || "last-90-calendar-days",
+          topn: Number($("h-reporte-topn").value) || 500,
+          guardarDefinicion: $("h-guardar-def").checked,
+          descargarCsv: $("h-csv-resumen").checked,
+        },
+        log,
+        onPaso
+      ));
+    } else if (desdeReporte) {
+      ({ resumen } = await ejecutarHardeningDesdeReporte(
+        {
+          target,
+          reporte: $("h-reporte").value.trim(),
+          containerXpath: xpathContenedorReportes(ubicacion.vsys),
+          reglas: reglas.length ? reglas : null,
+          periodo: $("h-reporte-periodo").value || null,
+          topn: Number($("h-reporte-topn").value) || null,
+          descargarCsv: $("h-csv-resumen").checked,
+        },
+        log,
+        onPaso
+      ));
+    } else {
+      ({ resumen } = await ejecutarHardening(
+        {
+          target,
+          reglas,
+          dias: Number($("h-dias").value),
+          descargarCsv: $("h-csv-resumen").checked,
+          ...ubicacion,
+          dispositivos: esPanorama
+            ? $("h-dispositivos")
+                .value.split("\n")
+                .map((d) => d.trim())
+                .filter(Boolean)
+            : null,
+        },
+        log,
+        (hechos, total) => {
+          $("h-progreso").textContent = `${hechos} / ${total} reglas`;
+        }
+      ));
+    }
+
+    // "Clonar y ajustar" actua sobre el mismo equipo y ubicacion del
+    // analisis, venga de logs o de reporte.
+    renderResumenHardening({ target, ...ubicacion, resumen });
   } catch (e) {
     log(e.message, "error");
   } finally {
@@ -819,6 +897,134 @@ $("form-hardening").addEventListener("submit", async (evento) => {
     btn.textContent = "Analizar";
   }
 });
+
+// ---------------------------------------------------------------------------
+//  Fuente de datos: logs vs Custom Report
+// ---------------------------------------------------------------------------
+
+const NOTA_FUENTE = {
+  logs:
+    "Recorre los logs crudos en tandas, negando las apps ya vistas. Es " +
+    "exhaustivo (no se le escapa ninguna aplicacion) pero lento, y el " +
+    "periodo lo limita el retention de logs del equipo.",
+  reporte:
+    "Reutiliza un Custom Report (trsum) ya creado en el equipo: PAN-OS ya " +
+    "tiene los datos agregados, asi que es mucho mas rapido y admite " +
+    "periodos largos (90 dias). A cambio, el topn del reporte limita la " +
+    "muestra y una app muy minoritaria puede quedar fuera.",
+};
+
+/** El contenedor de reportes por vsys depende del vsys indicado arriba. */
+function xpathContenedorReportes(vsys) {
+  const valor = $("h-reporte-contenedor").value;
+  if (valor !== "vsys") return valor;
+  const v = vsys || "vsys1";
+  return `/config/devices/entry/vsys/entry[@name='${v}']/reports`;
+}
+
+const NOTA_MODO = {
+  auto:
+    "La extension arma el reporte filtrando por las politicas que escribas " +
+    "arriba, lo ejecuta y lee el resultado. Por defecto no escribe nada en " +
+    "el equipo; marca la casilla si ademas quieres guardarlo.",
+  existente:
+    "Reutiliza un reporte que ya creaste en el equipo (por CLI o GUI). Se " +
+    "lee su definicion y se ejecuta ad hoc, sin modificarla.",
+};
+
+function ajustarFuenteHardening() {
+  const desdeReporte = $("h-fuente").value === "reporte";
+  const modoAuto = $("h-reporte-modo").value === "auto";
+
+  $("h-bloque-reporte").classList.toggle("oculto", !desdeReporte);
+  $("h-bloque-logs").classList.toggle("oculto", desdeReporte);
+  $("h-fuente-nota").textContent = NOTA_FUENTE[$("h-fuente").value] || "";
+  $("h-reporte-modo-nota").textContent = NOTA_MODO[$("h-reporte-modo").value] || "";
+
+  // "Listar" y guardar-definicion solo tienen sentido en su modo.
+  $("h-btn-listar").classList.toggle("oculto", modoAuto);
+  $("h-guardar-def-wrap").classList.toggle("oculto", !modoAuto);
+  $("h-guardar-def-nota").classList.toggle("oculto", !modoAuto);
+  $("h-btn-comandos").classList.toggle("oculto", modoAuto);
+
+  $("h-reporte").placeholder = modoAuto
+    ? "PAN-Helper-AppID (nombre con el que se guardaria)"
+    : "nombre del reporte existente";
+
+  // Las politicas solo son opcionales al reutilizar un reporte existente.
+  $("h-nota-politicas").textContent =
+    desdeReporte && !modoAuto
+      ? "Opcional al reutilizar un reporte: si lo dejas vacio se reportan todas " +
+        "las politicas que traiga (su propia query ya las acota). Si indicas " +
+        "nombres, el resultado se filtra a esos."
+      : "Se analizan exactamente las politicas que indiques aqui. El programa " +
+        "no lee el rulebase ni elige reglas por su cuenta.";
+}
+
+$("h-fuente").addEventListener("change", ajustarFuenteHardening);
+$("h-reporte-modo").addEventListener("change", ajustarFuenteHardening);
+
+// Lista los reportes que existen en el equipo, para no adivinar el nombre.
+$("h-btn-listar").addEventListener("click", async () => {
+  const target = targetPorId($("h-target").value);
+  if (!target) {
+    log("No hay conexion seleccionada.", "error");
+    return;
+  }
+
+  const btn = $("h-btn-listar");
+  btn.disabled = true;
+  try {
+    const esPanorama = /panorama/i.test(target.platform || "");
+    const xpath = xpathContenedorReportes(esPanorama ? null : $("h-vsys").value.trim());
+    log(`Listando Custom Reports en ${xpath}...`);
+
+    const nombres = await listarReportesDisponibles(target, xpath);
+
+    if (!nombres.length) {
+      $("h-reporte-nota").textContent = "No hay reportes en ese contenedor.";
+      log(
+        `Sin Custom Reports en ${xpath}. Crealos con los comandos SET (boton de abajo) ` +
+          `o revisa si estan en otro contenedor.`,
+        "warn"
+      );
+      return;
+    }
+
+    $("h-reporte-nota").textContent = `Disponibles: ${nombres.join(", ")}`;
+    log(`${nombres.length} reporte(s): ${nombres.join(", ")}`, "ok");
+    if (!$("h-reporte").value.trim()) $("h-reporte").value = nombres[0];
+  } catch (e) {
+    log(e.message, "error");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// Comandos SET para crear el reporte. La extension no los ejecuta: crear un
+// reporte es escritura de configuracion y el candado la prohibe.
+$("h-btn-comandos").addEventListener("click", () => {
+  const area = $("h-comandos");
+  const contenedor = $("h-reporte-contenedor").value === "vsys" ? "vsys" : "shared";
+
+  area.value = comandosSetReporte({
+    nombre: $("h-reporte").value.trim() || "PAN-Helper-AppID",
+    periodo: $("h-reporte-periodo").value || "last-90-calendar-days",
+    topn: Number($("h-reporte-topn").value) || 100,
+    topm: 25,
+    contenedor,
+  });
+  area.classList.remove("oculto");
+  area.select();
+
+  log(
+    "Comandos SET generados. Pegalos en una sesion CLI en modo 'configure' y haz commit; " +
+      "la extension no puede crear el reporte por ti.",
+    "warn"
+  );
+});
+
+ajustarFuenteHardening();
 
 // Contexto del ultimo analisis (equipo, vsys y resumen con la lista cruda
 // de apps por regla), necesario para "Clonar y ajustar".
