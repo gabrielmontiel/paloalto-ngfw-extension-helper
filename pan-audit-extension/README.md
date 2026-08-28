@@ -1,4 +1,4 @@
-# PAN Helper v0.2.6 — extensión de navegador
+# PAN Helper v0.2.7 — extensión de navegador
 
 Mezcla de **PAN-helper v0.1** y **pan-audit-extension**, quedándose con lo
 mejor de cada uno. **Sin commit**: las únicas escrituras posibles son
@@ -7,6 +7,53 @@ y —desde v0.2.6— guardar la definición de un Custom Report. Las tres van
 sobre la candidate config, sobre lo que el usuario marca y previa
 confirmación explícita. La extensión **no puede hacer commit** — revisar y
 hacer commit en la GUI es siempre manual.
+
+## Novedades de v0.2.7 (sobre v0.2.6)
+
+Módulo nuevo: **generación masiva de API keys** (port de
+`generador-apikeys-masivo/api-keys_concurrente.py`). Obtiene la API key de
+varios equipos a la vez y, con ella, su hostname, serial, modelo y versión;
+el resultado se descarga como CSV para inventario.
+
+- **Cuadrícula de credenciales.** La entrada es una tabla editable tipo hoja
+  de cálculo: pegas el rango desde Excel (Ctrl+V) y se rellena sola, o
+  escribes directamente en las celdas. Pegar con fila de cabecera reemplaza
+  la cuadrícula y usa esa fila para ordenar las columnas; pegar sin cabecera
+  rellena posicionalmente desde la celda enfocada, como haría Excel. Al
+  escribir en la última fila aparece otra, y cada fila tiene su `×`.
+- **Todas las filas se cargan**, incluidas las incompletas: quedan visibles
+  para completarlas ahí mismo en vez de desaparecer, y el resumen las cuenta
+  aparte (`2 equipo(s) listo(s) · 1 fila(s) incompleta(s)`). También detecta
+  repetidos por host + usuario.
+- **Cargar CSV** vuelca el archivo a la cuadrícula, así también queda
+  revisable antes de ejecutar. **Descargar plantilla** genera un CSV de
+  ejemplo con valores obviamente falsos.
+
+### Diferencias deliberadas con el script original
+
+| | Script Python | Extensión |
+|---|---|---|
+| Credenciales | `PA_PASS.xlsx` en disco, texto plano | pegadas, nunca tocan el disco |
+| `keygen` | contraseña **en la URL** | en el cuerpo del POST |
+| CSV de salida | arrastra la columna `Pass` | sin contraseñas |
+| Concurrencia | `ThreadPoolExecutor` sin límite | acotada a 4 |
+| Fallos de certificado | mezclados con el resto | agrupados, con enlaces para aceptarlos |
+
+La API key **no se muestra en pantalla**: va solo al CSV, para poder
+compartir pantalla o tomar captura del resultado sin exponer credenciales.
+Tampoco se guarda como conexión en la extensión. Al terminar, la cuadrícula
+y el campo de contraseña se vacían.
+
+**El CSV resultante es material sensible**: una API key de PAN-OS da el mismo
+acceso que la credencial. La interfaz lo advierte.
+
+### Limitación operativa
+
+Chrome exige que el certificado de cada host esté aceptado **antes** de poder
+consultarlo, y una extensión no puede saltarse esa advertencia como hacía el
+`verify=False` del script. Con equipos nuevos, la primera corrida sirve sobre
+todo para obtener la lista de los que fallan; tras aceptar sus certificados
+en una pestaña, la segunda sale limpia.
 
 ## Novedades de v0.2.6 (sobre v0.2.5)
 
@@ -302,7 +349,7 @@ además solo puede borrar objetos que la propia auditoría marcó como sin uso.
 
 1. Abrir `chrome://extensions`
 2. Activar **Modo de desarrollador** (arriba a la derecha)
-3. **Cargar descomprimida** → seleccionar esta carpeta (`pan-helper-0.2.3`)
+3. **Cargar descomprimida** → seleccionar esta carpeta
 4. Clic en el ícono → **Abrir dashboard** o **Administrar conexiones**
 
 ## Antes de conectar: aceptar el certificado
@@ -440,6 +487,18 @@ Parámetros en `js/modules/hardening.js`:
 | `APLICACIONES_RUIDO` | incomplete | negada desde la 1.ª tanda, nunca se recomienda |
 | `APLICACIONES_ALERTA` | insufficient-data, unknown-tcp/udp/p2p | se reportan aparte, nunca se recomiendan |
 
+### API Keys (generación masiva)
+
+Obtiene la API key de varios equipos a la vez y, con ella, hostname, serial,
+modelo y versión. Salida: CSV en `Descargas/PAN-Helper/apikeys/`.
+
+Entrada por **cuadrícula editable** — pegas desde Excel, escribes a mano o
+cargas un CSV; en los tres casos queda revisable y corregible antes de
+ejecutar.
+
+Solo lectura: `keygen` + `show system info`. No guarda las keys en la
+extensión ni las muestra en pantalla; van únicamente al CSV.
+
 ## Estructura
 
 ```
@@ -463,6 +522,7 @@ js/
     util.js              Concurrencia, CSV, descargas, rutas por fecha
     navbar.js            Inyección de navbar + contador en vivo
   modules/
+    apikeys.js           Generación masiva de API keys (cuadrícula + CSV)
     audit.js             Módulo de auditoría
     depuracion.js        Borrado de objetos sin uso (orden seguro + pre-chequeo)
     backups.js           Módulo de backups

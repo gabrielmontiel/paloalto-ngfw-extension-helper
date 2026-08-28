@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <title>PAN Helper v0.2.6 — Dashboard</title>
+  <title>PAN Helper v0.2.7 — Dashboard</title>
   <link rel="stylesheet" href="css/nav.css" />
   <link rel="stylesheet" href="css/app.css" />
 </head>
@@ -24,6 +24,10 @@
       <button class="menu-item" data-modulo="hardening">
         Hardening App-ID
         <span>Reglas con application = any</span>
+      </button>
+      <button class="menu-item" data-modulo="apikeys">
+        API Keys
+        <span>Generacion masiva para inventario</span>
       </button>
       <div class="menu-nota">
         Todos los modulos usan las conexiones guardadas — no vuelves a
@@ -347,6 +351,66 @@
         </form>
 
         <div id="h-resultado" class="panel-resultado"></div>
+      </section>
+
+      <!-- ---------- modulo: api keys ---------- -->
+      <section id="modulo-apikeys" class="modulo">
+        <h2>Generacion masiva de API keys</h2>
+        <p class="descripcion">
+          Obtiene la API key de varios equipos a la vez y, con ella, su
+          hostname, serial, modelo y version. El resultado se descarga como
+          CSV para inventario.
+        </p>
+
+        <p class="aviso-lectura">
+          Solo lectura: pide la API key y consulta <code>show system info</code>.
+          Las contrasenas se usan una unica vez y no se guardan en ningun lado.
+          Las API keys obtenidas <strong>no</strong> quedan en la extension: van
+          solo al CSV.
+        </p>
+
+        <form id="form-apikeys" autocomplete="off">
+
+          <!-- modo: cuadricula -->
+          <fieldset>
+            <legend>Equipos</legend>
+            <p class="nota">
+              Pega el rango desde Excel (Ctrl+V) o escribe directamente en las
+              celdas. Si el pegado trae la fila de cabecera, se usa para ordenar
+              las columnas y no cuenta como equipo. Nada se guarda en disco.
+            </p>
+
+            <div class="grid-credenciales" id="k-grid">
+              <table>
+                <thead>
+                  <tr>
+                    <th class="col-num"></th>
+                    <th>Cliente</th><th>IP o FQDN</th><th>Usuario</th><th>Contrasena</th>
+                    <th class="col-accion"></th>
+                  </tr>
+                </thead>
+                <tbody id="k-grid-body"></tbody>
+              </table>
+            </div>
+
+            <div class="grid-acciones">
+              <button type="button" id="k-btn-fila" class="secundario">+ Agregar fila</button>
+              <label for="k-archivo" class="etiqueta-archivo btn-archivo">Cargar CSV</label>
+              <input type="file" id="k-archivo" accept=".csv,.txt,text/csv" class="oculto">
+              <button type="button" id="k-btn-limpiar" class="secundario">Limpiar</button>
+              <button type="button" id="k-btn-plantilla" class="secundario">Descargar plantilla</button>
+              <span class="separador"></span>
+              <span id="k-grid-resumen" class="progreso"></span>
+            </div>
+          </fieldset>
+
+          <div class="acciones">
+            <button type="submit" id="k-btn" class="primario">Generar API keys</button>
+            <span id="k-progreso" class="progreso"></span>
+          </div>
+        </form>
+
+        <div id="k-resultado" class="panel-resultado"></div>
       </section>
 
       <!-- ---------- consola (siempre visible) ---------- -->

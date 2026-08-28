@@ -17,6 +17,13 @@ import {
   clonarYAjustar,
 } from "./modules/hardening.js";
 import { depurarObjetos, planificarDepuracion } from "./modules/depuracion.js";
+import {
+  mapearTablaAGrid,
+  dividirTabla,
+  CAMPOS_GRID,
+  csvPlantilla,
+  generarApiKeys,
+} from "./modules/apikeys.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -1183,6 +1190,317 @@ async function ejecutarClonado() {
     btn.disabled = false;
     btn.textContent = "Clonar y ajustar";
   }
+}
+
+// ---------------------------------------------------------------------------
+//  Modulo: generacion masiva de API keys
+// ---------------------------------------------------------------------------
+
+// Equipos que se van a procesar, calculados por la vista previa. Se guardan
+// aqui para que el submit no tenga que re-parsear ni releer el archivo.
+let equiposApiKeys = [];
+
+// --- cuadricula de credenciales -------------------------------------------
+//
+// La cuadricula es la entrada canonica: se pega desde Excel, se escribe a
+// mano o se carga un CSV, y en los tres casos queda editable antes de
+// ejecutar. Reemplaza al textarea + vista previa que habia antes: lo que se
+// ve es exactamente lo que se va a procesar.
+
+/** Crea una fila de la cuadricula con los valores dados. */
+function filaGrid(valores = {}) {
+  const tr = document.createElement("tr");
+
+  const num = document.createElement("td");
+  num.className = "col-num";
+  tr.appendChild(num);
+
+  for (const campo of CAMPOS_GRID) {
+    const td = document.createElement("td");
+    const input = document.createElement("input");
+    input.type = campo === "password" ? "password" : "text";
+    input.dataset.campo = campo;
+    input.value = valores[campo] || "";
+    input.autocomplete = "off";
+    td.appendChild(input);
+    tr.appendChild(td);
+  }
+
+  const accion = document.createElement("td");
+  accion.className = "col-accion";
+  const quitar = document.createElement("button");
+  quitar.type = "button";
+  quitar.className = "quitar-fila";
+  quitar.title = "Quitar fila";
+  quitar.textContent = "×";
+  accion.appendChild(quitar);
+  tr.appendChild(accion);
+
+  return tr;
+}
+
+/** Reemplaza el contenido de la cuadricula; siempre deja una fila vacia al final. */
+function pintarGrid(equipos = []) {
+  const cuerpo = $("k-grid-body");
+  cuerpo.innerHTML = "";
+  for (const e of equipos) cuerpo.appendChild(filaGrid(e));
+  cuerpo.appendChild(filaGrid());
+  renumerarGrid();
+  refrescarResumenApiKeys();
+}
+
+function renumerarGrid() {
+  [...$("k-grid-body").rows].forEach((tr, i) => {
+    tr.cells[0].textContent = String(i + 1);
+  });
+}
+
+/** Lee la cuadricula: equipos completos y cuantas filas quedaron a medias. */
+function leerGrid() {
+  const equipos = [];
+  const vistos = new Set();
+  let incompletas = 0;
+  let duplicadas = 0;
+
+  for (const tr of $("k-grid-body").rows) {
+    const v = {};
+    for (const input of tr.querySelectorAll("input")) {
+      v[input.dataset.campo] = input.value.trim();
+    }
+    // Una fila totalmente vacia es la de captura, no un error.
+    if (!v.cliente && !v.host && !v.usuario && !v.password) continue;
+
+    if (!v.host || !v.usuario || !v.password) {
+      incompletas++;
+      continue;
+    }
+    v.host = v.host.replace(/^https?:\/\//, "").replace(/\/$/, "");
+
+    // Un mismo equipo dos veces solo duplica trabajo y confunde la salida.
+    const clave = `${v.host}|${v.usuario}`;
+    if (vistos.has(clave)) {
+      duplicadas++;
+      continue;
+    }
+    vistos.add(clave);
+    equipos.push(v);
+  }
+
+  return { equipos, incompletas, duplicadas };
+}
+
+function refrescarResumenApiKeys() {
+  const { equipos, incompletas, duplicadas } = leerGrid();
+  equiposApiKeys = equipos;
+
+  const partes = [];
+  if (equipos.length) partes.push(`${equipos.length} equipo(s) listo(s)`);
+  if (incompletas) partes.push(`${incompletas} fila(s) incompleta(s)`);
+  if (duplicadas) partes.push(`${duplicadas} repetida(s)`);
+  $("k-grid-resumen").textContent = partes.join(" · ");
+}
+
+// Al escribir en la ultima fila aparece otra, para no tener que pulsar
+// "Agregar fila" en cada equipo.
+$("k-grid").addEventListener("input", (e) => {
+  if (!e.target.matches("input")) return;
+  const cuerpo = $("k-grid-body");
+  if (e.target.closest("tr") === cuerpo.rows[cuerpo.rows.length - 1]) {
+    cuerpo.appendChild(filaGrid());
+    renumerarGrid();
+  }
+  refrescarResumenApiKeys();
+});
+
+$("k-grid").addEventListener("click", (e) => {
+  if (!e.target.matches(".quitar-fila")) return;
+  const cuerpo = $("k-grid-body");
+  if (cuerpo.rows.length > 1) e.target.closest("tr").remove();
+  if (!cuerpo.rows.length) cuerpo.appendChild(filaGrid());
+  renumerarGrid();
+  refrescarResumenApiKeys();
+});
+
+/**
+ * Pegado tipo hoja de calculo.
+ *
+ * Con cabecera reconocible se reemplaza toda la cuadricula, que es el caso
+ * habitual: seleccionar el rango completo en Excel y pegarlo. Sin cabecera se
+ * rellena desde la celda enfocada hacia abajo y a la derecha, como haria
+ * Excel, para poder pegar una sola columna o corregir un bloque.
+ */
+$("k-grid").addEventListener("paste", (e) => {
+  const texto = e.clipboardData?.getData("text") || "";
+  const { filas } = dividirTabla(texto);
+
+  // Un valor suelto se deja al pegado normal del navegador.
+  if (filas.length <= 1 && (filas[0] || []).length <= 1) return;
+
+  e.preventDefault();
+
+  const { filas: mapeadas, conCabecera } = mapearTablaAGrid(texto);
+
+  if (conCabecera) {
+    // Se cargan TODAS las filas, incompletas incluidas: la cuadricula las
+    // muestra para que se corrijan, en vez de descartarlas en silencio.
+    pintarGrid(mapeadas);
+    log(`Pegado: ${mapeadas.length} fila(s) cargadas en la cuadricula.`, "ok");
+    return;
+  }
+
+  // --- pegado posicional ---
+  const activo = document.activeElement;
+  const trActivo = activo?.closest?.("tr");
+  const cuerpo = $("k-grid-body");
+  const filaInicio = trActivo ? [...cuerpo.rows].indexOf(trActivo) : 0;
+  const colInicio = activo?.dataset?.campo ? CAMPOS_GRID.indexOf(activo.dataset.campo) : 0;
+
+  filas.forEach((celdas, i) => {
+    const indice = filaInicio + i;
+    while (cuerpo.rows.length <= indice) cuerpo.appendChild(filaGrid());
+    const inputs = cuerpo.rows[indice].querySelectorAll("input");
+    celdas.forEach((valor, j) => {
+      const col = colInicio + j;
+      if (col < inputs.length) inputs[col].value = valor.trim();
+    });
+  });
+
+  const ultima = cuerpo.rows[cuerpo.rows.length - 1];
+  if ([...ultima.querySelectorAll("input")].some((i) => i.value)) {
+    cuerpo.appendChild(filaGrid());
+  }
+  renumerarGrid();
+  refrescarResumenApiKeys();
+  log(`Pegado: ${filas.length} fila(s) desde la posicion actual.`, "ok");
+});
+
+$("k-btn-fila").addEventListener("click", () => {
+  $("k-grid-body").appendChild(filaGrid());
+  renumerarGrid();
+});
+
+$("k-btn-limpiar").addEventListener("click", () => {
+  pintarGrid([]);
+  log("Cuadricula vaciada.");
+});
+
+// El CSV se vuelca a la cuadricula, no se usa directo: asi queda revisable y
+// corregible antes de ejecutar.
+$("k-archivo").addEventListener("change", async (evento) => {
+  const archivo = evento.target.files?.[0];
+  if (!archivo) return;
+  try {
+    const { filas: mapeadas, conCabecera } = mapearTablaAGrid(await archivo.text());
+    pintarGrid(mapeadas);
+    log(
+      `'${archivo.name}': ${mapeadas.length} fila(s) cargadas ` +
+        `(${conCabecera ? "con" : "sin"} cabecera). Revisalas antes de ejecutar.`,
+      "ok"
+    );
+  } catch (e) {
+    log(`No se pudo leer '${archivo.name}': ${e.message}`, "error");
+  } finally {
+    evento.target.value = "";
+  }
+});
+
+$("k-btn-plantilla").addEventListener("click", async () => {
+  try {
+    await descargarTexto(csvPlantilla(), "PAN-Helper/plantilla-apikeys.csv");
+    log("Plantilla en Descargas/PAN-Helper/plantilla-apikeys.csv", "ok");
+  } catch (e) {
+    log(e.message, "error");
+  }
+});
+
+pintarGrid([]);
+
+$("form-apikeys").addEventListener("submit", async (evento) => {
+  evento.preventDefault();
+
+  if (!equiposApiKeys.length) {
+    log("No hay equipos cargados. Pega las credenciales o carga un archivo.", "error");
+    return;
+  }
+
+  // Chrome exige gesto de usuario vivo: se piden todos los origenes de una,
+  // antes de cualquier await, o la peticion se rechaza.
+  let permisoOk;
+  try {
+    permisoOk = await chrome.permissions.request({
+      origins: [...new Set(equiposApiKeys.map((e) => `https://${e.host}/*`))],
+    });
+  } catch (e) {
+    log(`No se pudo solicitar permiso de acceso: ${e.message}`, "error");
+    return;
+  }
+  if (!permisoOk) {
+    log("Permiso denegado. Sin acceso a los equipos no se puede continuar.", "error");
+    return;
+  }
+
+  const btn = $("k-btn");
+  btn.disabled = true;
+  btn.textContent = "Generando...";
+  $("k-progreso").textContent = `0 / ${equiposApiKeys.length}`;
+  $("k-resultado").innerHTML = "";
+
+  try {
+    const { filas, fallosCertificado } = await generarApiKeys(
+      { equipos: equiposApiKeys, descargarCsv: true },
+      log,
+      (hechos, total) => {
+        $("k-progreso").textContent = `${hechos} / ${total}`;
+      }
+    );
+    renderResultadoApiKeys(filas, fallosCertificado);
+  } catch (e) {
+    log(e.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Generar API keys";
+    // Las contrasenas no siguen en el DOM despues de la ejecucion.
+    pintarGrid([]);
+    equiposApiKeys = [];
+    refrescarResumenApiKeys();
+  }
+});
+
+// La API key NO se muestra: va solo al CSV, para poder compartir pantalla o
+// tomar captura del resultado sin exponer credenciales.
+function renderResultadoApiKeys(filas, fallosCertificado) {
+  if (!filas?.length) return;
+
+  const cuerpo = filas
+    .map((f) => {
+      const ok = f.Estado === "OK";
+      return (
+        `<tr><td>${escapeHtml(f.Cliente || "-")}</td><td>${escapeHtml(f.IP)}</td>` +
+        `<td>${escapeHtml(f.Hostname || "-")}</td><td>${escapeHtml(f.Serial || "-")}</td>` +
+        `<td>${escapeHtml(f.Modelo || "-")}</td>` +
+        `<td><span class="badge ${ok ? "uso" : "high"}">${escapeHtml(f.Estado)}</span></td></tr>`
+      );
+    })
+    .join("");
+
+  const enlaces = fallosCertificado.length
+    ? `<div class="aviso-certificado"><strong>${fallosCertificado.length} equipo(s) ` +
+      `sin certificado aceptado.</strong> Abrelos, acepta la advertencia y vuelve a ` +
+      `ejecutar:<br>` +
+      fallosCertificado
+        .map(
+          (h) =>
+            `<a href="https://${encodeURIComponent(h)}" target="_blank" rel="noopener">${escapeHtml(h)}</a>`
+        )
+        .join(" &middot; ") +
+      `</div>`
+    : "";
+
+  $("k-resultado").innerHTML =
+    enlaces +
+    `<table><thead><tr><th>Cliente</th><th>IP</th><th>Hostname</th><th>Serial</th>` +
+    `<th>Modelo</th><th>Estado</th></tr></thead><tbody>${cuerpo}</tbody></table>` +
+    `<p class="nota-campo">La API key no se muestra en pantalla: esta en el CSV descargado.</p>`;
 }
 
 // ---------------------------------------------------------------------------
