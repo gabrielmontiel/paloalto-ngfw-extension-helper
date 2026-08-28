@@ -1,4 +1,4 @@
-# PAN Helper v0.2.7 — extensión de navegador
+# PAN Helper v0.2.8 — extensión de navegador
 
 Mezcla de **PAN-helper v0.1** y **pan-audit-extension**, quedándose con lo
 mejor de cada uno. **Sin commit**: las únicas escrituras posibles son
@@ -7,6 +7,52 @@ y —desde v0.2.6— guardar la definición de un Custom Report. Las tres van
 sobre la candidate config, sobre lo que el usuario marca y previa
 confirmación explícita. La extensión **no puede hacer commit** — revisar y
 hacer commit en la GUI es siempre manual.
+
+## Novedades de v0.2.8 (sobre v0.2.7)
+
+Versión de endurecimiento: sin funcionalidad nueva, solo correcciones de
+seguridad encontradas en una revisión del código.
+
+- **El candado ya no admite traversal.** La excepción abierta en v0.2.6 para
+  guardar Custom Reports terminaba en `(\/.*)?`, que dejaba pasar
+  `/config/shared/reports/../address`. Con un motor XPath que resuelva `..`,
+  un `action=set` habría alcanzado objetos o reglas — justo lo que el candado
+  promete impedir. Ahora el tramo final solo admite segmentos con forma de
+  nodo, y se rechazan `..`, `.`, `|`, `//` y llamadas a función.
+- **Saneamiento de valores interpolados en XPath.** El campo Vsys entraba sin
+  filtrar en `entry[@name='…']`: una comilla rompía la consulta y permitía
+  reescribir la ruta. `sanearValorXpath()` se aplica ahora al vsys y al
+  nombre del reporte.
+- **La API key ya no viaja en la URL al hacer backups.** `exportFile()`
+  intenta primero POST con la key en el cuerpo; hasta v0.2.7 iba siempre por
+  GET, dejando la key en el log del servidor web del propio equipo y en
+  cualquier proxy que intercepte TLS. Se conserva GET como respaldo —el
+  endpoint no acepta POST en todas las versiones de PAN-OS— y la caída
+  cubre tanto el rechazo HTTP como un 200 con XML de error.
+- **Eliminado el código muerto** que el manifest no cargaba: `lib/` (6
+  archivos), `options.html`/`options.js`, `dashboard.js` y `dashboard.css`
+  de raíz, y `nav.css`. Dos importaban: `lib/panApi.js` exponía
+  `setConfigNode` **sin candado alguno**, y `lib/policyGenerator.js` era el
+  Policy Optimizer retirado a propósito. Siguen recuperables desde el
+  historial de git.
+
+### Lo que la revisión NO encontró
+
+Sin credenciales ni secretos en el código. Sin XSS explotable: de los 17
+puntos donde se inserta HTML, los que no escapan reciben valores de
+conjuntos cerrados del propio motor (`address`/`service`, `valor`/`nombre`,
+`high`/`medium`/`low`/`info`); todo lo que viene del firewall pasa por
+`escapeHtml`. Sin `eval`, `new Function` ni manejadores inline. La
+contraseña solo existe en tránsito y se limpia del DOM al terminar.
+
+### Riesgos aceptados (inherentes al diseño)
+
+- Las API keys se guardan en `chrome.storage.local` en texto plano.
+- El CSV de API keys y el XML crudo de configuración quedan en Descargas sin
+  protección.
+- `optional_host_permissions: https://*/*` es amplio por necesidad (firewalls
+  de clientes arbitrarios); el permiso real se concede por host en tiempo de
+  ejecución.
 
 ## Novedades de v0.2.7 (sobre v0.2.6)
 

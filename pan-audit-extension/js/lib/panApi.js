@@ -98,8 +98,40 @@ const TIPOS_PROHIBIDOS = new Set(["commit", "import", "user-id"]);
 
 // Contenedores de Custom Reports: lo unico que se puede escribir por la via
 // de configuracion. Cubre shared y los reports por vsys, nada mas.
-const XPATH_REPORTES_ESCRIBIBLE =
-  /^\/config\/(shared|devices\/entry(\[[^\]]*\])?\/vsys\/entry\[@name='[^']*'\])\/reports(\/.*)?$/;
+//
+// El tramo final acepta subnodos del reporte (type/trsum, period...), pero
+// NO cualquier cosa: la version anterior usaba (\/.*)? y eso dejaba pasar
+// '/config/shared/reports/../address', que con un motor XPath que resuelva
+// '..' habria alcanzado objetos o reglas. El candado es una garantia de
+// diseno, asi que el tramo se limita a segmentos con forma de nodo.
+const SEGMENTO_XPATH = "[A-Za-z0-9_.-]+(\\[@?[A-Za-z0-9_.-]+='[^'\\]]*'\\])?";
+const XPATH_REPORTES_ESCRIBIBLE = new RegExp(
+  "^/config/(shared|devices/entry(\\[@name='[^'\\]]*'\\])?/vsys/entry\\[@name='[^'\\]]*'\\])" +
+    "/reports(/" + SEGMENTO_XPATH + ")*$"
+);
+
+/**
+ * Construcciones de XPath que permitirian salirse del subarbol autorizado.
+ * Ojo: corchetes y comillas simples NO van aqui, porque son legitimos en un
+ * predicado como entry[@name='X'] — la forma de esos predicados ya la acota
+ * SEGMENTO_XPATH.
+ *
+ *   ..   nodo padre        -> subir fuera de /reports
+ *   .    nodo actual       -> segmento inutil, senal de ruta manipulada
+ *   |    union             -> anadir una segunda ruta
+ *   //   descendant-or-self
+ *   ( )  llamadas a funcion
+ */
+const XPATH_PELIGROSO = /(^|\/)\.{1,2}(\/|$)|\||\/\/|[()]/;
+
+/**
+ * Sanea un valor que se va a interpolar dentro de un predicado XPath
+ * (nombre de vsys, de device-group, de reporte). Sin esto, un valor con una
+ * comilla rompe la consulta y, peor, permite reescribir la ruta.
+ */
+export function sanearValorXpath(valor) {
+  return String(valor || "").replace(/[^A-Za-z0-9_.\- ]/g, "").trim();
+}
 
 export class OperacionBloqueadaError extends Error {
   constructor(message) {
@@ -125,7 +157,12 @@ export function verificarSoloLectura(params) {
     // Se limita por xpath a los contenedores de reports (shared o vsys) y
     // solo admite 'set'. No alcanza a politicas, objetos ni nada mas, y
     // sigue sin existir commit: lo escrito queda en la candidate config.
-    if (accion === "set" && XPATH_REPORTES_ESCRIBIBLE.test(String(params.xpath || ""))) {
+    const xpath = String(params.xpath || "");
+    if (
+      accion === "set" &&
+      !XPATH_PELIGROSO.test(xpath) &&
+      XPATH_REPORTES_ESCRIBIBLE.test(xpath)
+    ) {
       return;
     }
     throw new OperacionBloqueadaError(
@@ -262,53 +299,99 @@ export async function getCandidateConfig(baseUrl, apiKey) {
 //  Export de archivos (backups)
 // ---------------------------------------------------------------------------
 
-// Va por GET a proposito: es lo que el modulo de backups de v0.1 verifico en
-// produccion. El endpoint de export no acepta POST de forma consistente
-// entre versiones de PAN-OS. keygen y el resto siguen por POST.
+// Se intenta primero POST, con la key en el cuerpo. Hasta v0.2.7 esto iba
+// siempre por GET, lo que dejaba la API key en la URL y por tanto en el log
+// del servidor web del propio equipo y en cualquier proxy que intercepte
+// TLS. Se conserva GET como respaldo porque el endpoint de export no acepta
+// POST de forma consistente entre versiones de PAN-OS, y el modulo de
+// backups de v0.1 se verifico en produccion por esa via.
+//
+// El respaldo es seguro: un export es de solo lectura, asi que un POST que
+// el equipo rechace no deja efecto alguno.
 export async function exportFile(baseUrl, apiKey, category) {
   const params = { type: "export", category, key: apiKey };
   verificarSoloLectura(params);
 
-  trace(`API GET ${new URL(baseUrl).host}: type=export category=${category}`);
+  const host = new URL(baseUrl).host;
 
-  let res;
-  try {
-    res = await fetch(`${baseUrl}/api/?${new URLSearchParams(params)}`, {
-      method: "GET",
-      signal: senalActual(),
-    });
-  } catch (e) {
-    if (e?.name === "AbortError") throw new OperacionCanceladaError();
-    throw errorDeRed(baseUrl, e);
-  }
-
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} al exportar '${category}'.`);
-  }
-
-  let blob;
-  try {
-    blob = await res.blob();
-  } catch (e) {
-    throw traducirAbort(e);
-  }
-
-  if (blob.size === 0) {
-    throw new Error(`El equipo devolvio un archivo vacio para '${category}'.`);
-  }
-
-  // Un export fallido devuelve una respuesta XML de error, siempre pequena.
-  // Solo se inspecciona ese caso; una config valida se devuelve tal cual.
-  if (blob.size < 4096) {
-    const texto = await blob.text();
-    if (texto.includes("<response") && texto.includes('status="error"')) {
-      unwrapApiResponse(parseXml(texto)); // lanza con el detalle del equipo
+  /**
+   * Un intento por un verbo concreto.
+   * @returns {{blob}|{errorXml}|null}
+   *   blob     -> exportacion valida
+   *   errorXml -> el equipo respondio, pero con un error de negocio
+   *   null     -> el verbo no sirve aqui (HTTP 4xx/5xx)
+   */
+  const intentar = async (metodo) => {
+    let res;
+    try {
+      res =
+        metodo === "POST"
+          ? await fetch(`${baseUrl}/api/`, {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams(params).toString(),
+              signal: senalActual(),
+            })
+          : await fetch(`${baseUrl}/api/?${new URLSearchParams(params)}`, {
+              method: "GET",
+              signal: senalActual(),
+            });
+    } catch (e) {
+      if (e?.name === "AbortError") throw new OperacionCanceladaError();
+      // Un fallo de red no se reintenta con el otro verbo: el equipo no esta
+      // accesible y cambiar de metodo no lo va a arreglar.
+      throw errorDeRed(baseUrl, e);
     }
-    // Contenido legitimo pero pequeno: el blob ya fue consumido, se rehace.
-    return new Blob([texto], { type: blob.type || "application/octet-stream" });
+
+    if (!res.ok) return null;
+
+    let blob;
+    try {
+      blob = await res.blob();
+    } catch (e) {
+      throw traducirAbort(e);
+    }
+
+    if (blob.size === 0) return null;
+
+    // Un export fallido devuelve una respuesta XML de error, siempre pequena.
+    // Solo se inspecciona ese caso; una config valida se devuelve tal cual.
+    if (blob.size < 4096) {
+      const texto = await blob.text();
+      if (texto.includes("<response") && texto.includes('status="error"')) {
+        return { errorXml: texto };
+      }
+      // Contenido legitimo pero pequeno: el blob ya fue consumido, se rehace.
+      return { blob: new Blob([texto], { type: blob.type || "application/octet-stream" }) };
+    }
+
+    return { blob };
+  };
+
+  trace(`API POST ${host}: type=export category=${category}`);
+  let intento = await intentar("POST");
+
+  // Se cae a GET tanto si el POST fue rechazado a nivel HTTP como si el
+  // equipo respondio 200 con un XML de error: ambas cosas significan que
+  // esta version de PAN-OS no atiende el export por POST.
+  if (!intento || intento.errorXml) {
+    trace(`${host}: el export no funciono por POST; reintentando por GET.`);
+    const porGet = await intentar("GET");
+    if (porGet) intento = porGet;
   }
 
-  return blob;
+  if (!intento) {
+    throw new Error(
+      `El equipo rechazo la exportacion de '${category}' tanto por POST como por GET.`
+    );
+  }
+
+  // Si tambien GET trajo error de negocio, se propaga el detalle del equipo.
+  if (intento.errorXml) {
+    unwrapApiResponse(parseXml(intento.errorXml));
+  }
+
+  return intento.blob;
 }
 
 // ---------------------------------------------------------------------------
@@ -429,7 +512,7 @@ export async function listarReportes(baseUrl, apiKey, containerXpath = XPATH_REP
 export async function obtenerDefinicionReporte(
   baseUrl, apiKey, nombre, containerXpath = XPATH_REPORTES_SHARED
 ) {
-  const xpath = `${containerXpath}/entry[@name='${String(nombre).replace(/'/g, "")}']`;
+  const xpath = `${containerXpath}/entry[@name='${sanearValorXpath(nombre)}']`;
   const entry = await getConfig(baseUrl, apiKey, xpath);
   if (!entry) {
     throw new Error(

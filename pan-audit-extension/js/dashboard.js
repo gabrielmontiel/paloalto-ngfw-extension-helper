@@ -4,7 +4,7 @@
 // app.js de PAN-helper v0.1).
 
 import { getTargets, TARGETS_KEY } from "./lib/store.js";
-import { setApiLogger, cancelarTodo } from "./lib/panApi.js";
+import { setApiLogger, cancelarTodo, sanearValorXpath } from "./lib/panApi.js";
 import { reglasDesdeCsv, aCsv, descargarTexto } from "./lib/util.js";
 import { ejecutarAuditoria } from "./modules/audit.js";
 import { ejecutarBackups } from "./modules/backups.js";
@@ -925,7 +925,9 @@ const NOTA_FUENTE = {
 function xpathContenedorReportes(vsys) {
   const valor = $("h-reporte-contenedor").value;
   if (valor !== "vsys") return valor;
-  const v = vsys || "vsys1";
+  // Sin sanear, un vsys con comilla rompe la consulta y permite reescribir
+  // la ruta para salirse del subarbol de reports.
+  const v = sanearValorXpath(vsys) || "vsys1";
   return `/config/devices/entry/vsys/entry[@name='${v}']/reports`;
 }
 
