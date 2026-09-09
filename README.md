@@ -17,7 +17,7 @@ la herramienta **no puede hacer commit**.
 | Módulo | Para qué sirve |
 |---|---|
 | **Auditoría** | Encuentra reglas deshabilitadas, objetos sin uso, objetos duplicados, reglas que se tapan entre sí y malas prácticas. Permite depurar los objetos que sobran. |
-| **Backups** | Descarga la configuración y el device-state de varios equipos, organizados por fecha. |
+| **Backups** | Descarga configuración, device-state y stats dump de varios equipos, organizados por fecha. |
 | **Hardening App-ID** | Descubre qué aplicaciones usa realmente cada regla y crea la versión endurecida de la política. |
 | **API Keys** | Obtiene la API key de muchos equipos a la vez y arma un inventario con hostname, serial, modelo y versión. |
 | **Certificados** | Revisa los certificados de todo el parque y los agrupa por urgencia de vencimiento. |
@@ -138,13 +138,22 @@ Qué resuelve por ti:
 
 ## Backups
 
-Marca los equipos y qué descargar. Hasta 4 en paralelo.
+Marca los equipos y qué artefactos descargar. Hasta 4 en paralelo.
 
 ```
 Descargas/PAN-Helper/2026/Septiembre/9/
-    PA-backup_FW-SEDE.xml          (configuración)
-    PA-DeviceState_FW-SEDE.tgz     (device state)
+    PA-backup_FW-SEDE.xml           (configuración)
+    PA-DeviceState_FW-SEDE.tgz      (device state)
+    PA-StatsDump_FW-SEDE.tar.gz     (stats dump)
 ```
+
+El **stats dump** es el archivo que pide el soporte de Palo Alto. A
+diferencia de los otros dos, el equipo lo genera como tarea: la extensión
+lanza el trabajo, espera mostrando el avance y recoge el archivo cuando
+termina. Viene desmarcado porque puede tardar varios minutos.
+
+Si la tarea falla en el equipo (por ejemplo, sin espacio en disco), se
+reporta el motivo en vez de descargar un archivo corrupto.
 
 ## Hardening App-ID
 

@@ -5,7 +5,7 @@
 //
 // Los archivos van a Descargas/PAN-Helper/AAAA/Mes/DD/ via chrome.downloads.
 
-import { baseUrlFor, exportFile, getSystemInfo } from "../lib/panApi.js";
+import { baseUrlFor, exportFile, exportarConJob, getSystemInfo } from "../lib/panApi.js";
 import { ejecutarEnLote, rutaPorFecha, nombreSeguro, descargarBlob } from "../lib/util.js";
 
 const CARPETA_RAIZ = "PAN-Helper";
@@ -42,19 +42,41 @@ async function procesarEquipo(target, opciones, log) {
     log(`${nombre}: device-state listo (${(blob.size / 1024 / 1024).toFixed(1)} MB) -> ${ruta}`, "ok");
   }
 
+  if (opciones.incluirStatsDump) {
+    // A diferencia de los otros dos, 'stats-dump' es asincrono: el equipo
+    // devuelve un job y hay que esperarlo antes de recoger el archivo.
+    log(`${nombre}: generando stats-dump (puede tardar varios minutos)...`);
+    let ultimo = "";
+    const blob = await exportarConJob(baseUrl, target.apiKey, "stats-dump", {
+      onProgreso: (porcentaje, estado) => {
+        // Solo se reporta cuando cambia, para no inundar la consola.
+        const actual = `${estado} ${porcentaje}%`;
+        if (actual !== ultimo) {
+          ultimo = actual;
+          log(`  ${nombre}: ${estado} ${porcentaje}%`, "debug");
+        }
+      },
+    });
+    const ruta = `${opciones.carpeta}/PA-StatsDump_${nombre}.tar.gz`;
+    await descargarBlob(blob, ruta);
+    archivos.push(ruta);
+    log(`${nombre}: stats-dump listo (${(blob.size / 1024 / 1024).toFixed(1)} MB) -> ${ruta}`, "ok");
+  }
+
   return { nombre, info, archivos };
 }
 
 /**
  * Punto de entrada del modulo.
  *
- * @param {{targets: object[], incluirConfig: boolean, incluirDeviceState: boolean}} config
+ * @param {{targets: object[], incluirConfig: boolean, incluirDeviceState: boolean,
+ *          incluirStatsDump: boolean}} config
  *        `targets` son conexiones guardadas (con apiKey), no credenciales.
  * @param {(mensaje: string, nivel?: string) => void} log
  * @param {(hechos: number, total: number) => void} onProgreso
  */
 export async function ejecutarBackups(config, log, onProgreso) {
-  const { targets, incluirConfig, incluirDeviceState } = config;
+  const { targets, incluirConfig, incluirDeviceState, incluirStatsDump } = config;
 
   const carpeta = `${CARPETA_RAIZ}/${rutaPorFecha()}`;
   log(`Destino: Descargas/${carpeta}`);
@@ -64,7 +86,11 @@ export async function ejecutarBackups(config, log, onProgreso) {
 
   const resultados = await ejecutarEnLote(targets, CONCURRENCIA, async (target) => {
     try {
-      return await procesarEquipo(target, { carpeta, incluirConfig, incluirDeviceState }, log);
+      return await procesarEquipo(
+        target,
+        { carpeta, incluirConfig, incluirDeviceState, incluirStatsDump },
+        log
+      );
     } finally {
       onProgreso(++hechos, targets.length);
     }

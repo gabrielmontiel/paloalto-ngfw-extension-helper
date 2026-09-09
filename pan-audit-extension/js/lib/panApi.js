@@ -331,8 +331,7 @@ export async function getCandidateConfig(baseUrl, apiKey) {
 //
 // El respaldo es seguro: un export es de solo lectura, asi que un POST que
 // el equipo rechace no deja efecto alguno.
-export async function exportFile(baseUrl, apiKey, category) {
-  const params = { type: "export", category, key: apiKey };
+async function descargarExport(baseUrl, params, etiqueta) {
   verificarSoloLectura(params);
 
   const host = new URL(baseUrl).host;
@@ -391,7 +390,7 @@ export async function exportFile(baseUrl, apiKey, category) {
     return { blob };
   };
 
-  trace(`API POST ${host}: type=export category=${category}`);
+  trace(`API POST ${host}: type=export ${etiqueta}`);
   let intento = await intentar("POST");
 
   // Se cae a GET tanto si el POST fue rechazado a nivel HTTP como si el
@@ -405,7 +404,7 @@ export async function exportFile(baseUrl, apiKey, category) {
 
   if (!intento) {
     throw new Error(
-      `El equipo rechazo la exportacion de '${category}' tanto por POST como por GET.`
+      `El equipo rechazo la exportacion de '${etiqueta}' tanto por POST como por GET.`
     );
   }
 
@@ -415,6 +414,80 @@ export async function exportFile(baseUrl, apiKey, category) {
   }
 
   return intento.blob;
+}
+
+/** Export directo: la respuesta ES el archivo (configuration, device-state). */
+export async function exportFile(baseUrl, apiKey, category) {
+  return descargarExport(baseUrl, { type: "export", category, key: apiKey }, `category=${category}`);
+}
+
+/**
+ * Export asincrono: el equipo no devuelve el archivo, devuelve un job que hay
+ * que esperar antes de recogerlo. Es como funciona 'stats-dump'.
+ *
+ * El script original hacia poll cada 100 ms sin limite: si un job se colgaba,
+ * martilleaba el firewall indefinidamente. Aqui hay intervalo razonable y
+ * tope de intentos.
+ *
+ * Tambien comprueba el RESULTADO del job. El original solo salia del bucle
+ * cuando el estado dejaba de ser PEND y descargaba a continuacion, asi que un
+ * job terminado en FAIL producia un .tar.gz con un XML de error dentro, sin
+ * que nadie se enterara.
+ *
+ * @param {object} opciones {intervaloMs, maxIntentos, onProgreso}
+ *        onProgreso(porcentaje, estado) para reportar el avance.
+ */
+export async function exportarConJob(baseUrl, apiKey, category, opciones = {}) {
+  const { intervaloMs = 2000, maxIntentos = 90, onProgreso = null } = opciones;
+
+  // --- 1. Solicitud: devuelve el job-id ---
+  const envio = await apiCall(baseUrl, { type: "export", category, key: apiKey });
+  const jobId = envio?.querySelector("job")?.textContent?.trim();
+  if (!jobId) {
+    throw new Error(
+      `El equipo no devolvio job-id al pedir '${category}'. ` +
+        `Puede que esta plataforma no soporte esa categoria de export.`
+    );
+  }
+  trace(`Export '${category}': job ${jobId} enviado.`);
+
+  // --- 2. Espera ---
+  for (let intento = 1; intento <= maxIntentos; intento++) {
+    const res = await op(baseUrl, apiKey, `<show><jobs><id>${jobId}</id></jobs></show>`);
+    const job = res?.querySelector("job");
+
+    const estado = job?.querySelector("status")?.textContent?.trim() || "";
+    const resultado = job?.querySelector("result")?.textContent?.trim() || "";
+    const progreso = job?.querySelector("progress")?.textContent?.trim() || "";
+
+    if (onProgreso) onProgreso(progreso, resultado || estado);
+
+    // Terminado: PAN-OS marca status=FIN y result=OK|FAIL.
+    if (estado === "FIN" || (resultado && resultado !== "PEND")) {
+      if (resultado === "FAIL") {
+        const detalle =
+          job?.querySelector("details")?.textContent?.trim() ||
+          job?.querySelector("warnings")?.textContent?.trim() ||
+          "sin detalle";
+        throw new Error(`El job ${jobId} de '${category}' termino en FAIL: ${detalle}`);
+      }
+      trace(`Export '${category}': job ${jobId} listo (${resultado || estado}).`);
+
+      // --- 3. Recogida del archivo ---
+      return descargarExport(
+        baseUrl,
+        { type: "export", category, action: "get", "job-id": jobId, key: apiKey },
+        `category=${category} job=${jobId}`
+      );
+    }
+
+    await esperar(intervaloMs, senalActual());
+  }
+
+  throw new Error(
+    `El job ${jobId} de '${category}' no termino tras ${maxIntentos} intentos ` +
+      `(${Math.round((maxIntentos * intervaloMs) / 1000)} s).`
+  );
 }
 
 // ---------------------------------------------------------------------------

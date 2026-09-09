@@ -3,6 +3,39 @@
 Notas de cada versión de PAN Helper. Para saber qué hace la herramienta y
 cómo se usa, ver el [README](README.md).
 
+## Novedades de v0.3.0 (sobre v0.2.9)
+
+**Stats dump** en el módulo de Backups (port de `Gerator-Dumps-Firewalls/`).
+Tercera casilla junto a configuración y device-state, en vez de un módulo
+aparte: es la misma tarea —descargar artefactos de los equipos marcados— y
+Backups ya tenía la lista de equipos, la organización por fecha y la
+concurrencia.
+
+A diferencia de los otros dos exports, `stats-dump` es **asíncrono**: el
+equipo devuelve un job, hay que esperarlo y después recoger el archivo. Se
+añadió `exportarConJob()` para eso, y `exportFile()` pasó a ser una envoltura
+sobre la misma descarga con respaldo POST→GET.
+
+Dos errores del script original, corregidos:
+
+- **No comprobaba el resultado del job.** Salía del bucle en cuanto el estado
+  dejaba de ser `PEND` y descargaba a continuación, así que un job terminado
+  en `FAIL` producía un `.tar.gz` con un XML de error dentro, sin que nadie
+  se enterara. Ahora se verifica y se reporta el detalle del equipo.
+- **Poll sin límite**: consultaba cada 100 ms indefinidamente. Si un job se
+  colgaba, martilleaba el firewall para siempre. Ahora hay intervalo de 2 s y
+  tope de intentos.
+
+También desaparece el `info.csv` con las API keys en texto plano que el
+script necesitaba: se usan las conexiones guardadas.
+
+### Nota sobre el versionamiento
+
+A partir de aquí se sigue semver de verdad: **funcionalidad nueva sube el
+*minor***, corrección o endurecimiento sube el *patch*. Las versiones 0.2.1 a
+0.2.9 incluyeron tres módulos completos en incrementos de parche, que debieron
+haber sido *minor*.
+
 ## Novedades de v0.2.9 (sobre v0.2.8)
 
 Módulo nuevo: **control de vencimiento de certificados** (port de

@@ -714,8 +714,9 @@ $("form-backups").addEventListener("submit", async (evento) => {
 
   const incluirConfig = $("b-config").checked;
   const incluirDeviceState = $("b-devicestate").checked;
+  const incluirStatsDump = $("b-statsdump").checked;
 
-  if (!incluirConfig && !incluirDeviceState) {
+  if (!incluirConfig && !incluirDeviceState && !incluirStatsDump) {
     log("Selecciona al menos un artefacto para descargar.", "error");
     return;
   }
@@ -727,7 +728,7 @@ $("form-backups").addEventListener("submit", async (evento) => {
 
   try {
     await ejecutarBackups(
-      { targets: seleccionados, incluirConfig, incluirDeviceState },
+      { targets: seleccionados, incluirConfig, incluirDeviceState, incluirStatsDump },
       log,
       (hechos, total) => {
         $("b-progreso").textContent = `${hechos} / ${total}`;

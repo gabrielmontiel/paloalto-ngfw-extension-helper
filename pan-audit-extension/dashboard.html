@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <title>PAN Helper v0.2.9 — Dashboard</title>
+  <title>PAN Helper v0.3.0 — Dashboard</title>
   <link rel="stylesheet" href="css/nav.css" />
   <link rel="stylesheet" href="css/app.css" />
 </head>
@@ -94,9 +94,9 @@
       <section id="modulo-backups" class="modulo">
         <h2>Backups de configuracion y device-state</h2>
         <p class="descripcion">
-          Descarga el <code>running-config</code> y el <code>device-state</code>
-          de cada equipo seleccionado, organizados por fecha en tu carpeta de
-          Descargas (<code>PAN-Helper/AAAA/Mes/DD/</code>).
+          Descarga los artefactos de cada equipo seleccionado, organizados por
+          fecha en tu carpeta de Descargas
+          (<code>PAN-Helper/AAAA/Mes/DD/</code>).
         </p>
 
         <form id="form-backups">
@@ -117,6 +117,11 @@
             <label class="check">
               <input type="checkbox" id="b-devicestate" checked>
               Device state (.tgz) — archivos grandes, tarda mas
+            </label>
+            <label class="check">
+              <input type="checkbox" id="b-statsdump">
+              Stats dump (.tar.gz) — para soporte de Palo Alto; el equipo lo
+              genera como tarea y puede tardar varios minutos
             </label>
           </fieldset>
 
