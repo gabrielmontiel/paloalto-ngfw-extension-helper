@@ -45,15 +45,23 @@ async function procesarEquipo(target, opciones, log) {
   if (opciones.incluirStatsDump) {
     // A diferencia de los otros dos, 'stats-dump' es asincrono: el equipo
     // devuelve un job y hay que esperarlo antes de recoger el archivo.
-    log(`${nombre}: generando stats-dump (puede tardar varios minutos)...`);
+    log(
+      `${nombre}: generando stats-dump. No hay limite de tiempo; si necesitas ` +
+        `abortarlo, usa "Cancelar llamadas".`
+    );
+
     let ultimo = "";
     const blob = await exportarConJob(baseUrl, target.apiKey, "stats-dump", {
-      onProgreso: (porcentaje, estado) => {
-        // Solo se reporta cuando cambia, para no inundar la consola.
+      onProgreso: (porcentaje, estado, segundos) => {
+        // Visible, no en modo detalle: en un job largo es la unica senal de
+        // que sigue vivo. Solo se reporta cuando el avance cambia, para no
+        // inundar la consola.
         const actual = `${estado} ${porcentaje}%`;
         if (actual !== ultimo) {
           ultimo = actual;
-          log(`  ${nombre}: ${estado} ${porcentaje}%`, "debug");
+          const min = Math.floor(segundos / 60);
+          const transcurrido = min ? `${min} min ${segundos % 60} s` : `${segundos} s`;
+          log(`  ${nombre}: stats-dump ${porcentaje}% (${estado}, ${transcurrido})`);
         }
       },
     });

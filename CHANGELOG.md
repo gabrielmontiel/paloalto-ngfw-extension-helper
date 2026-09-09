@@ -3,6 +3,33 @@
 Notas de cada versión de PAN Helper. Para saber qué hace la herramienta y
 cómo se usa, ver el [README](README.md).
 
+## Novedades de v0.3.1 (sobre v0.3.0)
+
+Corrección: **el stats dump ya no se rinde por tiempo**. En v0.3.0 la espera
+del job tenía un tope de 90 intentos (180 s) y en un equipo lento abortaba un
+dump que iba perfectamente:
+
+> El job 67118 de 'stats-dump' no termino tras 90 intentos (180 s).
+
+Ahora la espera no tiene límite. El job solo termina por una de tres razones:
+lo completa el equipo, el equipo lo marca en `FAIL`, o el usuario pulsa
+**Cancelar llamadas**. También corta si el equipo deja de reconocer el job en
+tres consultas seguidas (se reinició o lo descartó), porque esperar algo que
+ya no existe es esperar para siempre.
+
+Como no hay tope, el intervalo entre consultas **crece de 2 s a 30 s** y el
+avance del job se escribe en la consola con el tiempo transcurrido, para que
+un dump de veinte minutos se vea trabajando en vez de parecer colgado.
+
+Corrección de fondo, en la cancelación de cualquier espera larga: `cancelarTodo()`
+aborta y acto seguido instala un `AbortController` nuevo. Los bucles releían la
+señal en cada vuelta, así que si la cancelación caía **mientras una consulta
+estaba en vuelo**, la vuelta siguiente recibía una señal recién creada —sin
+abortar— y el bucle seguía girando. Con un tope de intentos el daño era acotado;
+sin tope habría sido un cuelgue permanente. Ahora cada operación se queda con la
+señal con la que arrancó. Afectaba a los tres bucles de espera: jobs de export,
+consulta de logs (hardening App-ID) y ejecución de reportes.
+
 ## Novedades de v0.3.0 (sobre v0.2.9)
 
 **Stats dump** en el módulo de Backups (port de `Gerator-Dumps-Firewalls/`).
@@ -22,9 +49,9 @@ Dos errores del script original, corregidos:
   dejaba de ser `PEND` y descargaba a continuación, así que un job terminado
   en `FAIL` producía un `.tar.gz` con un XML de error dentro, sin que nadie
   se enterara. Ahora se verifica y se reporta el detalle del equipo.
-- **Poll sin límite**: consultaba cada 100 ms indefinidamente. Si un job se
-  colgaba, martilleaba el firewall para siempre. Ahora hay intervalo de 2 s y
-  tope de intentos.
+- **Poll cada 100 ms**: en un job de diez minutos son 6.000 peticiones al
+  firewall. Ahora el intervalo arranca en 2 s. (El tope de intentos que se
+  añadió aquí resultó ser un error y se quitó en v0.3.1.)
 
 También desaparece el `info.csv` con las API keys en texto plano que el
 script necesitaba: se usan las conexiones guardadas.

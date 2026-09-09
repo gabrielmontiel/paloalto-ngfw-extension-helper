@@ -40,6 +40,10 @@ function trace(mensaje) {
 //  boton "Cancelar" del dashboard llama a cancelarTodo(): aborta cualquier
 //  llamada al firewall en vuelo (y los polls de logs en espera) y deja un
 //  controller nuevo listo para las ejecuciones siguientes.
+//
+//  Ojo con ese "controller nuevo": una operacion larga tiene que quedarse con
+//  la senal del principio (ver abortarSiCancelado) en vez de releerla en cada
+//  vuelta, o la cancelacion se pierde.
 // ---------------------------------------------------------------------------
 
 let abortController = new AbortController();
@@ -84,6 +88,20 @@ function esperar(ms, signal) {
     };
     signal.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+/**
+ * Corta la operacion si la senal con la que arranco ya fue abortada.
+ *
+ * Los bucles de espera largos (jobs de export, logs y reportes) tienen que
+ * quedarse con la senal del principio y comprobarla en cada vuelta, en vez de
+ * releer senalActual(). cancelarTodo() aborta y acto seguido instala un
+ * controller nuevo: si la cancelacion cae mientras una peticion esta en vuelo,
+ * releer la senal devuelve una recien creada -sin abortar- y el bucle seguiria
+ * girando para siempre despues de que el usuario pulso "Cancelar".
+ */
+function abortarSiCancelado(signal) {
+  if (signal.aborted) throw new OperacionCanceladaError();
 }
 
 // ---------------------------------------------------------------------------
@@ -425,20 +443,39 @@ export async function exportFile(baseUrl, apiKey, category) {
  * Export asincrono: el equipo no devuelve el archivo, devuelve un job que hay
  * que esperar antes de recogerlo. Es como funciona 'stats-dump'.
  *
- * El script original hacia poll cada 100 ms sin limite: si un job se colgaba,
- * martilleaba el firewall indefinidamente. Aqui hay intervalo razonable y
- * tope de intentos.
+ * NO hay limite de tiempo: generar un stats-dump en un equipo grande puede
+ * tardar mucho mas de lo que cualquier tope razonable permitiria, y cortarlo
+ * por reloj tira a la basura trabajo que el firewall ya hizo. La espera solo
+ * termina por una de estas razones:
+ *
+ *   - el job informa OK    -> se recoge el archivo
+ *   - el job informa FAIL  -> se lanza con el detalle del equipo
+ *   - el job desaparece    -> se lanza (el equipo ya no lo conoce)
+ *   - fallo de red         -> se lanza
+ *   - el usuario cancela   -> se lanza OperacionCanceladaError
+ *
+ * El boton rojo "Cancelar llamadas" es la salida: aborta la señal compartida
+ * y esperar() corta de inmediato.
+ *
+ * El intervalo entre consultas crece de 2 s hasta 30 s. El script original
+ * consultaba cada 100 ms, lo que en un job de diez minutos son 6.000
+ * peticiones al firewall; con el crecimiento son unas pocas decenas, sin
+ * imponer un tope al job.
  *
  * Tambien comprueba el RESULTADO del job. El original solo salia del bucle
  * cuando el estado dejaba de ser PEND y descargaba a continuacion, asi que un
  * job terminado en FAIL producia un .tar.gz con un XML de error dentro, sin
  * que nadie se enterara.
  *
- * @param {object} opciones {intervaloMs, maxIntentos, onProgreso}
- *        onProgreso(porcentaje, estado) para reportar el avance.
+ * @param {object} opciones {intervaloMs, intervaloMaxMs, onProgreso}
+ *        onProgreso(porcentaje, estado, segundos) para reportar el avance.
  */
 export async function exportarConJob(baseUrl, apiKey, category, opciones = {}) {
-  const { intervaloMs = 2000, maxIntentos = 90, onProgreso = null } = opciones;
+  const { intervaloMs = 2000, intervaloMaxMs = 30000, onProgreso = null } = opciones;
+
+  // La senal se toma una sola vez: es la unica forma de que "Cancelar" corte un
+  // bucle sin tope de tiempo (ver abortarSiCancelado).
+  const senal = senalActual();
 
   // --- 1. Solicitud: devuelve el job-id ---
   const envio = await apiCall(baseUrl, { type: "export", category, key: apiKey });
@@ -451,27 +488,48 @@ export async function exportarConJob(baseUrl, apiKey, category, opciones = {}) {
   }
   trace(`Export '${category}': job ${jobId} enviado.`);
 
-  // --- 2. Espera ---
-  for (let intento = 1; intento <= maxIntentos; intento++) {
+  // --- 2. Espera, sin tope de tiempo ---
+  const inicio = Date.now();
+  let espera = intervaloMs;
+  let sinNoticias = 0;
+
+  for (;;) {
+    abortarSiCancelado(senal);
     const res = await op(baseUrl, apiKey, `<show><jobs><id>${jobId}</id></jobs></show>`);
     const job = res?.querySelector("job");
+    const segundos = Math.round((Date.now() - inicio) / 1000);
 
-    const estado = job?.querySelector("status")?.textContent?.trim() || "";
-    const resultado = job?.querySelector("result")?.textContent?.trim() || "";
-    const progreso = job?.querySelector("progress")?.textContent?.trim() || "";
+    if (!job) {
+      // Un hueco aislado puede ser un tropiezo del equipo; que desaparezca de
+      // forma sostenida significa que ya no conoce el job y esperarlo seria
+      // esperar para siempre.
+      if (++sinNoticias >= 3) {
+        throw new Error(
+          `El equipo dejo de reportar el job ${jobId} de '${category}'. ` +
+            `Puede que se haya reiniciado o que el job fuera descartado.`
+        );
+      }
+      await esperar(espera, senal);
+      continue;
+    }
+    sinNoticias = 0;
 
-    if (onProgreso) onProgreso(progreso, resultado || estado);
+    const estado = job.querySelector("status")?.textContent?.trim() || "";
+    const resultado = job.querySelector("result")?.textContent?.trim() || "";
+    const progreso = job.querySelector("progress")?.textContent?.trim() || "";
+
+    if (onProgreso) onProgreso(progreso, resultado || estado, segundos);
 
     // Terminado: PAN-OS marca status=FIN y result=OK|FAIL.
     if (estado === "FIN" || (resultado && resultado !== "PEND")) {
       if (resultado === "FAIL") {
         const detalle =
-          job?.querySelector("details")?.textContent?.trim() ||
-          job?.querySelector("warnings")?.textContent?.trim() ||
+          job.querySelector("details")?.textContent?.trim() ||
+          job.querySelector("warnings")?.textContent?.trim() ||
           "sin detalle";
         throw new Error(`El job ${jobId} de '${category}' termino en FAIL: ${detalle}`);
       }
-      trace(`Export '${category}': job ${jobId} listo (${resultado || estado}).`);
+      trace(`Export '${category}': job ${jobId} listo tras ${segundos} s (${resultado || estado}).`);
 
       // --- 3. Recogida del archivo ---
       return descargarExport(
@@ -481,13 +539,10 @@ export async function exportarConJob(baseUrl, apiKey, category, opciones = {}) {
       );
     }
 
-    await esperar(intervaloMs, senalActual());
+    await esperar(espera, senal);
+    // Un job largo no necesita que se le pregunte cada dos segundos.
+    espera = Math.min(Math.round(espera * 1.5), intervaloMaxMs);
   }
-
-  throw new Error(
-    `El job ${jobId} de '${category}' no termino tras ${maxIntentos} intentos ` +
-      `(${Math.round((maxIntentos * intervaloMs) / 1000)} s).`
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -688,8 +743,10 @@ export async function ejecutarReporteAdHoc(baseUrl, apiKey, typeXml, opciones = 
  */
 export async function esperarReporte(baseUrl, apiKey, jobId, opciones = {}) {
   const { intervaloMs = 2000, maxIntentos = 60, onEspera = null } = opciones;
+  const senal = senalActual();
 
   for (let intento = 1; intento <= maxIntentos; intento++) {
+    abortarSiCancelado(senal);
     const result = await apiCall(baseUrl, {
       type: "report",
       action: "get",
@@ -719,7 +776,7 @@ export async function esperarReporte(baseUrl, apiKey, jobId, opciones = {}) {
     }
 
     if (onEspera) onEspera(intento, maxIntentos);
-    await esperar(intervaloMs, senalActual());
+    await esperar(intervaloMs, senal);
   }
 
   throw new Error(
@@ -750,6 +807,7 @@ export async function queryLogs(baseUrl, apiKey, query, opciones = {}) {
     maxIntentos = 60,
     onEspera = null,
   } = opciones;
+  const senal = senalActual();
 
   // --- envio de la consulta ---
   const paramsEnvio = {
@@ -770,6 +828,7 @@ export async function queryLogs(baseUrl, apiKey, query, opciones = {}) {
 
   // --- poll hasta FIN ---
   for (let intento = 1; intento <= maxIntentos; intento++) {
+    abortarSiCancelado(senal);
     const result = await apiCall(baseUrl, {
       type: "log",
       action: "get",
@@ -792,7 +851,7 @@ export async function queryLogs(baseUrl, apiKey, query, opciones = {}) {
     }
 
     if (onEspera) onEspera(intento, maxIntentos);
-    await esperar(intervaloMs, senalActual());
+    await esperar(intervaloMs, senal);
   }
 
   throw new Error(
