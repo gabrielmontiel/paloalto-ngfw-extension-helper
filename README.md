@@ -1,215 +1,299 @@
-# PAN-OS Config Auditor (Chrome extension)
+# PAN Helper
 
-Fetches config from a Palo Alto firewall or Panorama over the PAN-OS XML
-API and:
+Extensión de navegador para operar y auditar firewalls **Palo Alto PAN-OS** y
+**Panorama**. Todo corre dentro de Chrome: no hay servidor, no hay Python que
+instalar y ningún dato sale de tu equipo salvo hacia el firewall que tú
+indicas.
 
-- **Audits** it for disabled rules, unused address/service objects,
-  possibly-shadowed rules, and best-practice gaps (overly-open rules,
-  missing profiles, logging disabled, untagged rules).
-- **Optimizes** overly-open rules — any allow rule with `any` in **one or
-  more** of source, destination, application, or service (an OR, not only the
-  all-four any/any/any/any case). It pulls **one** PAN-OS Custom Report
-  covering all traffic and reuses it for every rule, generating either a
-  narrower replacement rule or an app-id backfill, as SET commands and/or a
-  direct push to the *candidate* config for you to review and commit.
+Nació de un conjunto de scripts de Python que había que ejecutar a mano, con
+las credenciales en un Excel y la API key escrita en el propio código. Aquí
+esas tareas viven en una interfaz, cada ingeniero usa su propia credencial y
+la herramienta **no puede hacer commit**.
 
-Everything runs client-side in the extension. Nothing is sent anywhere
-except the firewall/Panorama you point it at.
+---
 
-## Load it
+## Qué hace
 
-1. Go to `chrome://extensions`, enable **Developer mode** (top right).
-2. Click **Load unpacked**, select this folder.
-3. Click the extension icon → **Open Dashboard** or **Manage Connections**.
+| Módulo | Para qué sirve |
+|---|---|
+| **Auditoría** | Encuentra reglas deshabilitadas, objetos sin uso, objetos duplicados, reglas que se tapan entre sí y malas prácticas. Permite depurar los objetos que sobran. |
+| **Backups** | Descarga la configuración y el device-state de varios equipos, organizados por fecha. |
+| **Hardening App-ID** | Descubre qué aplicaciones usa realmente cada regla y crea la versión endurecida de la política. |
+| **API Keys** | Obtiene la API key de muchos equipos a la vez y arma un inventario con hostname, serial, modelo y versión. |
+| **Certificados** | Revisa los certificados de todo el parque y los agrupa por urgencia de vencimiento. |
 
-## Before you connect
+## El principio que ordena todo: sin commit
 
-PAN-OS management interfaces almost always present a self-signed (or
-internal-CA) certificate. Chrome extensions can't click through a cert
-warning the way a regular tab can, so:
+La extensión **no puede aplicar cambios en producción.** Puede proponer y
+puede escribir en la *candidate config*, pero el commit lo haces tú desde la
+GUI del firewall, después de revisar.
 
-1. Open `https://<firewall-or-panorama-ip>` in a normal tab once and accept
-   the certificate warning.
-2. *Then* add the target on the Connections page.
+Esto no es una promesa: está impuesto en el código. Una única capa de red
+(`js/lib/panApi.js`) verifica cada petición antes de tocar la red y rechaza
+`commit`, `import` y cualquier escritura de configuración salvo una excepción
+acotada por xpath. Las operaciones que sí escriben —clonar reglas, depurar
+objetos— piden confirmación explícita y solo actúan sobre lo que marcaste.
 
-If you skip this, "Connect & Save" fails with a network error even though
-the credentials are correct.
+**En la práctica:** puedes auditar el firewall de un cliente en producción sin
+que exista la posibilidad técnica de modificarlo.
 
-## Firewall/Panorama-side requirements
+---
 
-The account you connect with needs an **Admin Role Profile** with XML API
-access for at least: **Configuration** (read running/candidate config, and
-write if you'll use the Policy Optimizer's "push to candidate"),
-**Operational Requests** (keygen, show system info), and **Report** (the
-Policy Optimizer's traffic analysis). Palo Alto's recommended practice is a
-dedicated API service account rather than reusing a personal admin login.
+## Instalación
 
-## How auth works
+1. Abre `chrome://extensions`
+2. Activa **Modo de desarrollador** (arriba a la derecha)
+3. **Cargar descomprimida** → selecciona la carpeta `pan-audit-extension`
+4. Clic en el ícono → **Abrir dashboard**
 
-1. You enter username + password once on the Connections page.
-2. The extension calls `type=keygen` to exchange them for an API key.
-3. Only the API key is stored (`chrome.storage.local`); the password is
-   discarded immediately after the keygen call.
-4. Every subsequent request uses the stored key.
-5. Everything (including keygen) is sent as a **POST** with the key/password
-   in the request body, not the URL — the first version of this project
-   used GET, which puts credentials in browser history and any web-server
-   access logs. Fixed.
+> **Nota:** requiere Modo de desarrollador, que algunas organizaciones
+> bloquean por política. En ese caso hay que empaquetarla y desplegarla por
+> política de grupo.
 
-Chrome prompts you to grant host permission for that specific hostname/IP
-the first time you connect (Manifest V3 requires this per-origin, at
-runtime — it can't be pre-baked for arbitrary customer firewalls).
+## Antes del primer uso: aceptar el certificado
 
-## Using the dashboard
+Los firewalls usan certificado autofirmado. Chrome bloquea las peticiones a un
+host cuyo certificado no ha sido aceptado, y una extensión **no puede saltarse
+esa advertencia** (es el equivalente al `verify=False` de los scripts, que en
+el navegador no existe).
 
-1. Toolbar icon → **Open Dashboard**.
-2. Pick a saved target and a config source:
-   - **Running config** — what's active/effective right now (includes
-     Panorama-pushed policy on a managed firewall).
-   - **Candidate config** — what's staged but not yet committed. Useful to
-     audit your own or someone else's in-progress changes before commit,
-     and it's also where the Policy Optimizer's "push" writes to.
-3. **Fetch & Audit**, then browse the tabs.
-4. **Export Findings (JSON/CSV)** to share the audit results, or
-   **Export Raw XML** to download the fetched config and do anything else
-   with it yourself outside the extension.
+Por cada equipo nuevo, una sola vez:
 
-## Policy Optimizer
+1. Abre `https://<ip-del-equipo>` en una pestaña normal
+2. **Configuración avanzada → Acceder a \<ip\> (no seguro)**
+3. Vuelve a la extensión
 
-A rule is flagged as **overly open** when it's an allow rule with `any` in
-**one or more** of source, destination, application, or service — a single
-unrestricted field is already worth narrowing, so this is an OR, not only the
-all-four any/any/any/any case. The Optimizer panel lists every such rule and
-shows which fields are `any`.
+Si no lo haces, verás un error de conexión que lo indica.
 
-You run **one** traffic report for the whole firewall (see below) and then,
-for each rule, two actions are available:
+## Crear una conexión
 
-- **Narrow using report** — rewrites only the fields that were `any` to what
-  was actually observed for that rule; fields you'd already scoped are left
-  untouched.
-- **Add App-ID using report** — leaves source/destination alone, adds the
-  observed applications, and switches service to `application-default`.
+En **Conexiones**, ingresa etiqueta, IP, usuario y contraseña. La extensión
+cambia la credencial por una API key (`type=keygen`) y **descarta la
+contraseña**: solo guarda la key. A partir de ahí, todos los módulos la
+reutilizan y no vuelves a escribir credenciales.
 
-Both generate a new rule named `<original>-narrowed` or `<original>-appid`
-(configurable suffix) rather than editing the original in place, so the old
-rule stays until you're confident enough to disable or remove it — the same
-approach as the two GUI tools this was ported from.
+Chrome pedirá permiso para ese host concreto la primera vez.
 
-### One report for the whole firewall
+## Permisos necesarios en el equipo
 
-Rather than pulling a separate report per rule, the Optimizer runs a **single**
-ad hoc report covering **all** traffic and reuses it for every rule. In the
-Optimizer panel:
+La cuenta necesita un **Admin Role Profile** con acceso XML API a:
 
-1. Enter the report container xpath and report name, pick a period/Top N, then
-   click **Run traffic report (all rules)** — once.
-2. The extension caches the returned rows and enables the **Narrow** / **Add
-   App-ID** buttons on every listed rule.
-3. Each button filters the cached rows down to that rule (by the report's
-   **Rule** column) — no additional report jobs are submitted.
+| Para usar | Necesita |
+|---|---|
+| Auditoría, Backups, Certificados | **Configuration** (lectura), **Operational Requests** |
+| Hardening App-ID | además **Log** y **Report** |
+| Clonar y ajustar | además REST → Policies → Security Rules (escritura) |
+| Depurar objetos | además REST → Objects (escritura) |
 
-### Setting up a Custom Report (one-time, per firewall/Panorama)
+Si solo vas a auditar y respaldar, **una cuenta de solo lectura basta**.
 
-The Optimizer deliberately does **not** guess at PAN-OS's internal summary
-database schema — instead it re-runs a report you build once in the GUI, ad
-hoc, over all traffic (grouped by rule). To set one up:
+---
 
-1. On the firewall (or Panorama, if reporting on Panorama-visible logs):
-   **Monitor → Manage Custom Reports → Add**.
-2. Database: **Traffic Log** (or Traffic Summary, depending on version).
-3. Columns to include: at minimum **Rule**, **Source Address**, **Destination
-   Address**, **Application**, **Service/Port** — these are what the Optimizer
-   looks for (it matches column names case-insensitively against a few common
-   aliases; see `lib/policyGenerator.js`). The **Rule** column is required: the
-   single all-traffic report is attributed back to each rule by rule name.
-4. **Group by Rule** (and sort however else you like) so every rule appears in
-   the one report — this is what lets a single report cover all rules.
-5. Save it with a name you'll remember (e.g. `all-traffic-by-rule`).
-6. In the extension's Optimizer panel, enter that name and click
-   **List available** to confirm the container xpath is right (defaults to
-   `/config/shared/reports`; for a per-vsys report on a firewall use
-   `/config/devices/entry/vsys/entry[@name='vsys1']/reports` instead).
+# Uso
 
-The Optimizer then re-runs that exact report definition ad hoc **once**, with
-no `(rule eq ...)` filter (so it covers all traffic) and your chosen time
-period — so you get PAN-OS's own pre-aggregated numbers, fast, without pulling
-raw logs. Per-rule attribution is done client-side from the **Rule** column,
-so the same report is reused for every rule instead of one report per rule.
+## Auditoría
 
-### Pushing changes
+Elige una conexión, decide si analizar la **running config** (lo activo) o la
+**candidate** (lo que está en staging sin commit), y pulsa **Auditar**. La
+configuración se descarga y se analiza entera en tu navegador.
 
-**Push new rule to candidate config** calls the config API's `action=set`
-against the exact rulebase xpath the audit found the original rule in. It:
+Cinco pestañas de resultados:
 
-- Only ever writes to the **candidate** config — never running, never
-  auto-committed. You still commit yourself, from the firewall/Panorama, on
-  your own schedule.
-- Only **adds** the new suffixed rule — it never touches or deletes the
-  original overly-open rule.
-- Asks for an explicit confirmation before pushing.
+- **Reglas deshabilitadas** — toda regla con `disabled = yes`.
+- **Objetos sin uso** — address, services y grupos que no aparecen en ninguna
+  política *ni en el resto de la configuración*. Ver más abajo.
+- **Objetos duplicados** — mismo contenido con distinto nombre, o mismo nombre
+  en varios ámbitos.
+- **Posibles sombras** — reglas que quedan inalcanzables por una anterior.
+- **Buenas prácticas** — `any` en reglas allow, sin perfil de seguridad, sin
+  log, sin tags.
 
-If you'd rather not push via the API at all, copy the generated SET
-commands (or download them as `.txt`) and paste them into a CLI session or
-Panorama's config-mode terminal yourself — same output, your call on how
-it's applied.
+Exporta los hallazgos a JSON o CSV, o el XML crudo de la configuración.
 
-## Known limitations (v1)
+### Ejemplo: depurar objetos sin uso
 
-- Only the **security** rulebase is analyzed — NAT, decryption, QoS,
-  authentication rulebases aren't audited yet.
-- Panorama **templates** aren't walked (only device-group objects/rules).
-- Device-group hierarchy (needed so a child device-group can "see" a
-  parent's objects) is read from `/config/readonly/.../parent-dg`. If your
-  config export doesn't include that section, every device-group is
-  treated as a direct child of Shared — this only affects cross-device-
-  group unused-object detection, not per-device-group rule auditing.
-- Dynamic address groups (tag-based) can't be resolved statically, so
-  their members are never flagged as "unused" — intentional, to avoid
-  false positives.
-- Shadow detection is a heuristic (same-or-broader `any` fields + same
-  action). Treat every "possibly shadowed" result as a lead to check
-  manually, not a verdict.
-- The Policy Optimizer's report-column matching assumes reasonably standard
-  column names (rule/source/destination/application/service). If your report
-  uses very different naming, adjust `COLUMN_ALIASES` in
-  `lib/policyGenerator.js`.
-- The single all-traffic report is attributed back to rules by **rule name**.
-  On Panorama, if the same rule name exists in more than one device-group,
-  those rows can't be told apart from the report alone — narrow such rules
-  with care, or add a device-group column and extend the matching.
-- There's no CSV-import fallback in this version (the two GUI tools this
-  was ported from supported loading a Traffic Report CSV directly) — the
-  live report pull was prioritized since PAN-OS's own summarization is
-  faster than client-side CSV parsing. Re-adding a CSV path as an
-  alternative input to `summarizeRows()` in `lib/policyGenerator.js` would
-  be a small, self-contained addition if you still want it as a fallback
-  for environments where Custom Reports aren't practical.
+El caso típico tras años de acumulación.
 
-## Architecture notes
+1. **Auditar** → pestaña **Objetos sin uso**
+2. Los chips de arriba (`address-group 4`, `address 37`…) saltan a cada
+   sección. El orden es el **orden seguro de eliminación**: grupos primero.
+3. Marca lo que quieras eliminar y pulsa **Depurar**
+4. El popup lista exactamente qué se va a borrar. Confirma.
+5. **Revisa en la GUI del firewall y haz commit tú**
 
-- `lib/panApi.js` — XML API client (keygen, running/candidate config,
-  set-config, ad hoc report jobs). All POST, all credentials out of the URL.
-- `lib/auditEngine.js` — pure config-XML analysis, no UI or network
-  dependencies. This is also where rulebase xpaths get computed, since the
-  Optimizer needs them to push changes back to the right location.
-- `lib/policyGenerator.js` — turns report rows into a suggested rule
-  (as SET commands and as pushable XML). No PAN-OS calls in this file.
-- `lib/store.js` — `chrome.storage.local` target persistence.
-- `lib/navbar.js` — the one place the nav's markup/behavior lives; both
-  `dashboard.html` and `options.html` include it with a single
-  `<script src="lib/navbar.js" type="module">` tag, so editing the nav
-  once updates both pages. It also live-refreshes the target-count badge
-  via `chrome.storage.onChanged` — the same mechanism `dashboard.js` and
-  `options.js` use to refresh their own target dropdown/list without
-  needing a manual reload when a target is added elsewhere.
+Qué resuelve por ti:
 
+- Si un objeto pertenece a un grupo que **no** vas a borrar, primero lo quita
+  del grupo y después lo elimina. Sin eso el firewall rechaza el borrado.
+- Si el grupo también está marcado, lo borra antes que sus miembros —
+  calculando el orden por dependencias, así que funciona con grupos anidados.
+- Si quitar un objeto dejaría un grupo estático vacío (PAN-OS no lo admite),
+  lo omite y te dice que marques también el grupo.
 
-  ## Todo:
-  #Remove todo items if they've already been done
-  - Make the app create the report instead of asking for a name of an existing report
-  - Make the report automatically filter by rules that can be optimized (either any in src, dst, app, port)
+> **Qué significa "sin uso" aquí:** se verifica contra security, NAT
+> (incluidas direcciones traducidas), decryption, QoS, PBF, authentication,
+> DoS, SD-WAN, tunnel-inspect, la pertenencia recursiva a grupos, y el resto
+> de la configuración —virtual routers, rutas estáticas, VPN, GlobalProtect—.
+> Lo que aparece listado no está en ningún otro lado del firewall.
 
-  #Features
-  - Delete unused objects, take into account objects that are members of other object groups that could be used in a policy
-  - 
+## Backups
+
+Marca los equipos y qué descargar. Hasta 4 en paralelo.
+
+```
+Descargas/PAN-Helper/2026/Septiembre/9/
+    PA-backup_FW-SEDE.xml          (configuración)
+    PA-DeviceState_FW-SEDE.tgz     (device state)
+```
+
+## Hardening App-ID
+
+Reemplaza `application = any` por las aplicaciones que la regla usa de verdad.
+
+**Dos fuentes de datos**, según lo que necesites:
+
+| | Logs (iterativo) | Custom Report |
+|---|---|---|
+| Exhaustividad | total, no se escapa ninguna app | limitada por el `topn` |
+| Velocidad | lenta | rápida (datos ya agregados) |
+| Periodo | según el retention de logs | largo (90 días) sin problema |
+
+La vía de **logs** consulta en tandas de 1000, negando en cada iteración las
+aplicaciones ya vistas, hasta que no aparecen nuevas. La de **Custom Report**
+arma un reporte `trsum` agregado por regla y aplicación, y lo ejecuta.
+
+### Ejemplo: endurecer cinco reglas
+
+1. Elige la conexión. Si es un **Panorama**, aparecen sus campos: device
+   group, pre/post-rulebase y los dispositivos para acotar los logs.
+2. Escribe los nombres de las políticas, uno por línea (o carga un CSV con
+   columna `Rule`).
+3. **Analizar.** Al terminar tienes la tabla con las aplicaciones encontradas
+   por política.
+4. Marca las que quieras endurecer, ajusta el **sufijo** si hace falta
+   (`-AppID` por defecto) y pulsa **Clonar y ajustar**.
+5. Se crea `<Política>-AppID` en la candidate config, clonada de la original
+   con el `application` reemplazado, y se mueve justo antes de la original.
+   **La regla original nunca se toca.**
+6. Revisa y haz commit tú. En Panorama, además el push al device group.
+
+> Si vuelves a correr el análisis semanas después y la regla `-AppID` ya
+> existe, no la duplica: compara y le **agrega solo las aplicaciones nuevas**.
+
+Las aplicaciones de baja visibilidad (`unknown-tcp`, `unknown-udp`,
+`unknown-p2p`, `insufficient-data`) se reportan aparte y **nunca** entran en
+la regla: requieren revisión manual antes de cerrar la política.
+
+## API Keys
+
+Para levantar el inventario de un cliente nuevo.
+
+La entrada es una **cuadrícula editable**: seleccionas el rango en tu Excel,
+Ctrl+C, Ctrl+V y se rellena sola. También puedes escribir directamente en las
+celdas o cargar un CSV.
+
+```
+   Cliente | IP o FQDN | Usuario | Contraseña
+ 1  ACME   | 10.0.0.1  | admin   | ••••••••     ×
+ 2  ACME   | 10.0.0.2  | admin   | ••••••••     ×
+ 3         |           |         |              ×
+
+                        2 equipo(s) listo(s)
+```
+
+Las columnas pueden ir **en cualquier orden** — se detectan por el nombre de
+la cabecera, y se aceptan variantes (`Hostname`, `Usuario`, `Password`…). Las
+filas incompletas se cargan igual, para que las completes ahí mismo.
+
+Al ejecutar, obtiene la API key de cada equipo y con ella su hostname, serial,
+modelo y versión. Salida:
+
+```
+Descargas/PAN-Helper/apikeys/ApiKeys_202609091430.csv
+```
+
+> **El CSV es material sensible**: una API key de PAN-OS da el mismo acceso
+> que la credencial. La API key no se muestra en pantalla ni se guarda en la
+> extensión — va únicamente a ese archivo.
+>
+> Las contraseñas nunca tocan el disco: se usan una vez y se limpian de la
+> pantalla al terminar.
+
+## Certificados
+
+Marca los equipos y pulsa **Revisar certificados**. Los agrupa por urgencia:
+
+```
+[1 Vencido]  [3 Critico]  [1 Proximo]  [1 Vigente]
+
+Estado    Dias  Equipo    Ambito             Certificado     Expira
+Vencido   -12   FW-SEDE   n/a                wildcard-corp   Aug 28 2026
+Critico     3   PANO-01   template TPL-Sede  tpl-mgmt        Sep 12 2026
+Critico    18   FW-SEDE   n/a                gp-portal       Sep 27 2026
+Proximo    75   FW-SEDE   n/a                ssl-decrypt     Nov 23 2026
+```
+
+Los umbrales (30 y 90 días) son configurables. En un firewall consulta los
+compartidos y, si es multi-vsys, los de cada vsys; en Panorama recorre los
+templates más los del propio Panorama.
+
+---
+
+## Seguridad
+
+| | |
+|---|---|
+| **Dependencias de terceros** | Ninguna. Sin `package.json`, sin CDN. |
+| **Backend / telemetría** | No hay. El único tráfico es navegador → firewall. |
+| **Contraseñas** | Se usan una vez para obtener la API key y se descartan. Nunca se guardan. |
+| **API keys** | En `chrome.storage.local`, **en texto plano**. |
+| **En tránsito** | Solo HTTPS. La contraseña va en el cuerpo del POST, nunca en la URL. |
+| **Permisos** | `storage` y `downloads`. El acceso a cada firewall se concede por host en tiempo de ejecución. |
+| **Trazabilidad** | Cada acción queda en los logs de PAN-OS con el usuario real del ingeniero. |
+
+### Riesgos que conviene conocer
+
+- Las **API keys guardadas están en texto plano** en el perfil de Chrome.
+  Quien tenga acceso a ese perfil puede leerlas. Usa cuentas de solo lectura
+  cuando sea posible y no dejes guardadas conexiones de clientes que ya no
+  administras.
+- Los archivos descargados —CSV de API keys, XML crudo de configuración—
+  quedan **sin protección** en tu carpeta de Descargas. El XML de una
+  configuración incluye hashes de contraseñas de administradores y material
+  criptográfico.
+
+## Limitaciones conocidas
+
+- Las pestañas de **reglas deshabilitadas, sombras y buenas prácticas**
+  analizan solo el rulebase de *security*. (La detección de objetos sin uso sí
+  cubre todas las políticas.)
+- Los **templates de Panorama no se recorren** en la auditoría de
+  configuración — sí en certificados.
+- Los **address-groups dinámicos** (por tag) no se resuelven estáticamente,
+  así que sus miembros nunca se marcan como sin uso. Es deliberado, para no
+  producir falsos positivos.
+- La **detección de sombras es heurística**: trata cada resultado como algo a
+  verificar, no como veredicto.
+- El `topn` del Custom Report **limita la muestra**: una aplicación muy
+  minoritaria puede quedar fuera. Para exhaustividad, usa la vía de logs.
+
+## Estado de madurez
+
+**Beta funcional, apta para piloto controlado.** El módulo de backups está
+verificado contra equipos reales. El resto está cubierto por pruebas
+automatizadas contra firewalls simulados, pero **los caminos de escritura
+(clonar, depurar) y el soporte de Panorama no tienen aún rodaje en
+producción**. Pruébalos en laboratorio antes de usarlos con un cliente.
+
+---
+
+## Documentación adicional
+
+- **[CHANGELOG.md](CHANGELOG.md)** — historial de versiones y qué cambió en cada una.
+- **[pan-audit-extension/README.md](pan-audit-extension/README.md)** — decisiones de
+  diseño, arquitectura y cómo agregar un módulo nuevo.
+
+## Licencia
+
+MIT. Sin dependencias de terceros, así que no hay obligaciones de
+cumplimiento heredadas.
