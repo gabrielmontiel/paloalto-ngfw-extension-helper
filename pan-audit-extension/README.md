@@ -1,4 +1,4 @@
-# PAN Helper v0.2.8 — extensión de navegador
+# PAN Helper v0.2.9 — extensión de navegador
 
 Mezcla de **PAN-helper v0.1** y **pan-audit-extension**, quedándose con lo
 mejor de cada uno. **Sin commit**: las únicas escrituras posibles son
@@ -7,6 +7,25 @@ y —desde v0.2.6— guardar la definición de un Custom Report. Las tres van
 sobre la candidate config, sobre lo que el usuario marca y previa
 confirmación explícita. La extensión **no puede hacer commit** — revisar y
 hacer commit en la GUI es siempre manual.
+
+## Novedades de v0.2.9 (sobre v0.2.8)
+
+Módulo nuevo: **control de vencimiento de certificados** (port de
+`control-vencimiento-certificados/`). Revisa los equipos marcados y agrupa
+sus certificados por urgencia — **vencido / crítico / próximo / vigente**—
+con los días restantes, umbrales configurables y exportación a CSV.
+
+Funciona en firewall (compartidos, y por cada vsys si es multi-vsys) y en
+Panorama (templates más los certificados del propio Panorama). Solo lectura.
+
+Ver la sección **Certificados** para los tres errores del script original que
+se corrigieron al portarlo.
+
+En la capa compartida: `getSystemInfo()` devuelve ahora `multiVsys`, `op()`
+acepta acotar el comando a un vsys, y se añadió `listarNombres()` para leer
+listas de atributos por XML API — esto reemplaza la llamada REST con versión
+hardcodeada (`/restapi/v10.2/Panorama/Templates`) del script original, que
+solo funcionaba en PAN-OS 10.2.
 
 ## Novedades de v0.2.8 (sobre v0.2.7)
 
@@ -545,6 +564,32 @@ ejecutar.
 Solo lectura: `keygen` + `show system info`. No guarda las keys en la
 extensión ni las muestra en pantalla; van únicamente al CSV.
 
+### Certificados
+
+Revisa los certificados de cada equipo marcado y los agrupa por urgencia:
+**vencido / crítico / próximo / vigente**, con los días restantes. Umbrales
+configurables (30 y 90 días por defecto). Tabla en pantalla y CSV en
+`Descargas/PAN-Helper/certificados/`.
+
+| | Firewall | Panorama |
+|---|---|---|
+| Qué consulta | `request certificate show` (compartidos) | templates + certificados propios |
+| Multi-vsys | repite la consulta por cada vsys | n/a |
+
+Solo lectura. Port de `control-vencimiento-certificados/`, con tres errores
+del original corregidos:
+
+- **Los certificados ya vencidos se descartaban** (`if fecha < hoy: continue`).
+  Son lo más urgente de un informe; aquí encabezan la tabla.
+- **Doble conteo**: el `else` colgaba del segundo `if`, así que todo lo
+  urgente aparecía también en la tabla de "más de 3 meses". La clasificación
+  ahora es excluyente.
+- **Certificados con la misma fecha se confundían**: el nombre se recuperaba
+  con `fechas.index(fecha)`, que devuelve la primera coincidencia.
+
+Además incluye los certificados del propio Panorama, que el original omitía,
+y tolera un `issuer` sin `CN=` en vez de reventar.
+
 ## Estructura
 
 ```
@@ -569,6 +614,7 @@ js/
     navbar.js            Inyección de navbar + contador en vivo
   modules/
     apikeys.js           Generación masiva de API keys (cuadrícula + CSV)
+    certificados.js      Control de vencimiento (firewall, vsys y Panorama)
     audit.js             Módulo de auditoría
     depuracion.js        Borrado de objetos sin uso (orden seguro + pre-chequeo)
     backups.js           Módulo de backups

@@ -17,6 +17,7 @@ import {
   clonarYAjustar,
 } from "./modules/hardening.js";
 import { depurarObjetos, planificarDepuracion } from "./modules/depuracion.js";
+import { ejecutarCertificados, ESTADOS } from "./modules/certificados.js";
 import {
   mapearTablaAGrid,
   dividirTabla,
@@ -141,11 +142,18 @@ async function poblarTargets() {
 
   $("a-btn").disabled = !targetsCache.length;
 
-  // Lista de checkboxes de backups (conserva lo marcado si sigue vivo).
+  // Listas de checkboxes (backups y certificados) — conservan lo marcado.
+  for (const id of ["b-targets", "c-targets"]) pintarListaEquipos(id);
+}
+
+/** Lista de equipos con checkbox; conserva la seleccion previa si sigue viva. */
+function pintarListaEquipos(contenedorId) {
+  const lista = $(contenedorId);
+  if (!lista) return;
+
   const marcados = new Set(
-    [...document.querySelectorAll("#b-targets input:checked")].map((i) => i.value)
+    [...lista.querySelectorAll("input:checked")].map((i) => i.value)
   );
-  const lista = $("b-targets");
   lista.innerHTML = "";
 
   if (!targetsCache.length) {
@@ -1503,6 +1511,124 @@ function renderResultadoApiKeys(filas, fallosCertificado) {
     `<table><thead><tr><th>Cliente</th><th>IP</th><th>Hostname</th><th>Serial</th>` +
     `<th>Modelo</th><th>Estado</th></tr></thead><tbody>${cuerpo}</tbody></table>` +
     `<p class="nota-campo">La API key no se muestra en pantalla: esta en el CSV descargado.</p>`;
+}
+
+// ---------------------------------------------------------------------------
+//  Modulo: certificados
+// ---------------------------------------------------------------------------
+
+const ETIQUETA_ESTADO = {
+  vencido: "Vencido",
+  critico: "Critico",
+  proximo: "Proximo",
+  vigente: "Vigente",
+  desconocido: "Sin fecha",
+};
+
+// Reutiliza las insignias de severidad que ya existen para la auditoria.
+const BADGE_ESTADO = {
+  vencido: "high",
+  critico: "medium",
+  proximo: "low",
+  vigente: "uso",
+  desconocido: "info",
+};
+
+$("form-certificados").addEventListener("submit", async (evento) => {
+  evento.preventDefault();
+
+  const seleccionados = [...document.querySelectorAll("#c-targets input:checked")]
+    .map((i) => targetPorId(i.value))
+    .filter(Boolean);
+
+  if (!seleccionados.length) {
+    log("Marca al menos un equipo para revisar.", "error");
+    return;
+  }
+
+  const umbralCritico = Number($("c-critico").value);
+  const umbralProximo = Number($("c-proximo").value);
+
+  if (umbralProximo <= umbralCritico) {
+    log("El umbral 'proximo' debe ser mayor que el 'critico'.", "error");
+    return;
+  }
+
+  const btn = $("c-btn");
+  btn.disabled = true;
+  btn.textContent = "Revisando...";
+  $("c-progreso").textContent = `0 / ${seleccionados.length}`;
+  $("c-resultado").innerHTML = "";
+
+  try {
+    const { filas, resumen, fallidos } = await ejecutarCertificados(
+      {
+        targets: seleccionados,
+        umbralCritico,
+        umbralProximo,
+        incluirVigentes: $("c-vigentes").checked,
+        descargarCsv: $("c-csv").checked,
+      },
+      log,
+      (hechos, total) => {
+        $("c-progreso").textContent = `${hechos} / ${total}`;
+      }
+    );
+    renderCertificados(filas, resumen, fallidos);
+  } catch (e) {
+    log(e.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Revisar certificados";
+  }
+});
+
+function renderCertificados(filas, resumen, fallidos) {
+  const cont = $("c-resultado");
+
+  if (!filas.length) {
+    cont.innerHTML =
+      '<div class="vacio">No se encontraron certificados con los criterios indicados.</div>';
+    return;
+  }
+
+  // Tarjetas de resumen, en orden de urgencia.
+  const tarjetas = [...ESTADOS, "desconocido"]
+    .filter((e) => resumen[e])
+    .map(
+      (e) =>
+        `<div class="tarjeta"><div class="num">${resumen[e]}</div>` +
+        `<div class="lbl">${escapeHtml(ETIQUETA_ESTADO[e])}</div></div>`
+    )
+    .join("");
+
+  const cuerpo = filas
+    .map(
+      (f) =>
+        `<tr><td><span class="badge ${BADGE_ESTADO[f.Estado] || "info"}">` +
+        `${escapeHtml(ETIQUETA_ESTADO[f.Estado] || f.Estado)}</span></td>` +
+        `<td>${escapeHtml(f["Dias restantes"])}</td>` +
+        `<td>${escapeHtml(f.Equipo)}</td>` +
+        `<td>${escapeHtml(f.Ambito)}</td>` +
+        `<td>${escapeHtml(f.Certificado)}</td>` +
+        `<td>${escapeHtml(f.Expira)}</td>` +
+        `<td>${escapeHtml(f.Emisor)}</td></tr>`
+    )
+    .join("");
+
+  const errores = fallidos.length
+    ? `<div class="aviso-certificado"><strong>${fallidos.length} equipo(s) no respondieron:</strong> ` +
+      fallidos.map((f) => escapeHtml(f.host)).join(", ") +
+      `. El detalle esta en el registro.</div>`
+    : "";
+
+  cont.innerHTML =
+    `<section class="tarjetas">${tarjetas}</section>` +
+    errores +
+    `<div class="panel"><table><thead><tr>` +
+    `<th>Estado</th><th>Dias</th><th>Equipo</th><th>Ambito</th>` +
+    `<th>Certificado</th><th>Expira</th><th>Emisor</th>` +
+    `</tr></thead><tbody>${cuerpo}</tbody></table></div>`;
 }
 
 // ---------------------------------------------------------------------------

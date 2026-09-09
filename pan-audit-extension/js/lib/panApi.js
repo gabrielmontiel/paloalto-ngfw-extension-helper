@@ -248,8 +248,28 @@ export async function keygen(baseUrl, username, password) {
   return key;
 }
 
-export async function op(baseUrl, apiKey, cmdXml) {
-  return apiCall(baseUrl, { type: "op", cmd: cmdXml, key: apiKey });
+/**
+ * Comando operacional. `vsys` acota el comando a un vsys concreto: PAN-OS
+ * responde con lo que ve ese vsys, no lo compartido (lo usa la consulta de
+ * certificados en equipos multi-vsys).
+ */
+export async function op(baseUrl, apiKey, cmdXml, { vsys = null } = {}) {
+  const params = { type: "op", cmd: cmdXml, key: apiKey };
+  if (vsys) params.vsys = vsys;
+  return apiCall(baseUrl, params);
+}
+
+/**
+ * Lee un xpath que apunta a atributos (p. ej. .../entry/@name) y devuelve
+ * los nombres. Sirve para listar vsys y templates sin descargarse su
+ * configuracion entera.
+ */
+export async function listarNombres(baseUrl, apiKey, xpath) {
+  const result = await apiCall(baseUrl, { type: "config", action: "get", xpath, key: apiKey });
+  if (!result) return [];
+  return Array.from(result.querySelectorAll("entry"))
+    .map((e) => e.getAttribute("name"))
+    .filter(Boolean);
 }
 
 export async function getSystemInfo(baseUrl, apiKey) {
@@ -265,6 +285,9 @@ export async function getSystemInfo(baseUrl, apiKey) {
     swVersion: leer("sw-version") || "desconocido",
     // El campo model de "show system info" en Panorama dice "Panorama".
     isPanorama: /panorama/i.test(leer("model") || ""),
+    // 'on' cuando el firewall tiene multiples vsys: los certificados hay que
+    // pedirlos entonces por cada vsys, ademas de los compartidos.
+    multiVsys: (leer("multi-vsys") || "").toLowerCase() === "on",
   };
 }
 

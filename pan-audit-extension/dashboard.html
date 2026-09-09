@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <title>PAN Helper v0.2.8 — Dashboard</title>
+  <title>PAN Helper v0.2.9 — Dashboard</title>
   <link rel="stylesheet" href="css/nav.css" />
   <link rel="stylesheet" href="css/app.css" />
 </head>
@@ -28,6 +28,10 @@
       <button class="menu-item" data-modulo="apikeys">
         API Keys
         <span>Generacion masiva para inventario</span>
+      </button>
+      <button class="menu-item" data-modulo="certificados">
+        Certificados
+        <span>Control de vencimiento</span>
       </button>
       <div class="menu-nota">
         Todos los modulos usan las conexiones guardadas — no vuelves a
@@ -411,6 +415,62 @@
         </form>
 
         <div id="k-resultado" class="panel-resultado"></div>
+      </section>
+
+      <!-- ---------- modulo: certificados ---------- -->
+      <section id="modulo-certificados" class="modulo">
+        <h2>Control de vencimiento de certificados
+          <span class="etiqueta-plataforma">firewall / Panorama</span></h2>
+        <p class="descripcion">
+          Revisa los certificados de cada equipo y los agrupa por urgencia. En
+          un firewall consulta los compartidos y, si es multi-vsys, los de cada
+          vsys; en Panorama recorre los templates y los del propio Panorama.
+        </p>
+
+        <p class="aviso-lectura">
+          Solo lectura: consulta el estado de los certificados. No modifica
+          nada ni los renueva.
+        </p>
+
+        <form id="form-certificados">
+          <fieldset>
+            <legend>Equipos</legend>
+            <p class="nota">
+              Se usan las conexiones guardadas. Marca los equipos a revisar.
+            </p>
+            <div id="c-targets" class="lista-checks"></div>
+          </fieldset>
+
+          <fieldset>
+            <legend>Umbrales de aviso</legend>
+            <div class="fila">
+              <div>
+                <label for="c-critico">Critico: vence en menos de (dias)</label>
+                <input type="number" id="c-critico" value="30" min="1" max="365" required>
+              </div>
+              <div>
+                <label for="c-proximo">Proximo: vence en menos de (dias)</label>
+                <input type="number" id="c-proximo" value="90" min="2" max="730" required>
+              </div>
+            </div>
+            <label class="check" style="margin-top:10px;">
+              <input type="checkbox" id="c-vigentes" checked>
+              Incluir tambien los vigentes (fuera de los umbrales)
+            </label>
+            <label class="check">
+              <input type="checkbox" id="c-csv" checked>
+              Descargar CSV al finalizar
+              (<code>Descargas/PAN-Helper/certificados/</code>)
+            </label>
+          </fieldset>
+
+          <div class="acciones">
+            <button type="submit" id="c-btn" class="primario">Revisar certificados</button>
+            <span id="c-progreso" class="progreso"></span>
+          </div>
+        </form>
+
+        <div id="c-resultado"></div>
       </section>
 
       <!-- ---------- consola (siempre visible) ---------- -->
