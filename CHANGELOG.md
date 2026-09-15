@@ -3,6 +3,84 @@
 Notas de cada versión de PAN Helper. Para saber qué hace la herramienta y
 cómo se usa, ver el [README](README.md).
 
+## Novedades de v0.4.0 (sobre v0.3.1)
+
+Módulo nuevo: **Best Practices** (port del script Python de BPA original). Genera el
+Best Practice Assessment en **HTML** y en **Excel de 11 hojas** —Resumen,
+Hallazgos, Adopción de seguridad, Reglas, BP Mode con gráfico de radar,
+Decryption, Certificados, Zonas, Perfiles, Plataforma y Detalle— desde tres
+orígenes que terminan en el mismo formato `best_practices`:
+
+- **JSON de BPA existente**, con la configuración opcional del equipo (de una
+  conexión guardada o de un `running-config.xml`) para resolver los Security
+  Profile Groups.
+- **Palo Alto SCM Posture API**: token, subida de la running config (de una
+  conexión guardada o de un archivo), espera sin tope y cancelable, y
+  descarga del resultado. Es la **primera función de la extensión que envía
+  datos fuera del firewall**, así que exige una confirmación explícita, pide
+  el service account en cada uso sin guardarlo y solo conecta con una lista
+  cerrada de hosts de Palo Alto.
+- **Evaluación local**: 45 checks propios sobre la configuración (reglas,
+  descifrado, perfiles, zonas, administración, actualizaciones, HA y
+  certificados), para firewall y Panorama, sin salir del navegador. No es el
+  BPA oficial, y el reporte lo dice.
+
+Sigue sin haber dependencias de terceros: el Excel lo escribe
+`js/lib/xlsxWriter.js` (zip + XML, con estilos, fórmulas, celdas combinadas,
+paneles fijos, filtros y gráfico de radar).
+
+Respecto al script original:
+
+- **Mismo Excel, celda por celda.** Se comparó contra el `build()` de Python
+  en tres escenarios (sin XML, con XML y con `adoption` presente).
+- **Perfiles usados dentro de un grupo.** Con el XML, un perfil que solo se
+  usa vía Security Profile Group aparece como "Sí (grupo)". El script lo
+  marcaba "No", lo que invitaba a borrar perfiles en uso.
+- **Marca neutral** (PAN Helper) en lugar de la marca del script original.
+- Los textos `"no"`/`"false"` en campos de regla cuentan como falso (el script
+  los trataba como verdadero).
+- El cliente de SCM no sigue redirecciones (no pueden sacar la petición de
+  la lista de hosts), envía el token solo a la API y no al almacenamiento, y
+  quita de los mensajes de error la query de los URL firmados y cualquier
+  token o secret.
+- El cliente de SCM tolera las variantes de respuesta observadas (`task_id`,
+  `data.status`, `202`, `custom_check_url`, reporte comprimido en gzip), renueva
+  el token si vence durante la espera y corta si SCM deja de reconocer el
+  reporte.
+
+En **Auditoría**, la pestaña "Buenas prácticas" se mantiene como vista rápida
+por regla y enlaza al módulo nuevo para el assessment completo.
+
+Cambios en **Auditoría**:
+
+- **Depuración por lotes.** Nuevo campo *Máx. borrados por sesión* (100 por
+  defecto, se recuerda entre usos). Borrar más de ~200 objetos de una vez
+  llegó a tumbar el firewall; ahora cada pulsación de **Depurar** borra como
+  máximo ese número y lo demás queda marcado para la siguiente sesión. El
+  lote es un prefijo del orden por dependencias (nunca un miembro sin su
+  grupo marcado), los grupos que quedarían vacíos se calculan con la
+  selección completa, y el popup avisa si el lote supera 200.
+- **Balance de depuración.** Antes y después de cada sesión: objetos en la
+  configuración, objetos sin uso y cuánto se había depurado en el equipo
+  antes y después. El historial por equipo se guarda localmente (fecha,
+  antes/después, eliminados, errores, pendientes, límite) y
+  **Recontar desde la candidate** vuelve a auditar conservando lo marcado y
+  verifica el balance contra el equipo.
+- **Análisis de tags** (pestaña nueva, solo lectura): tags sin uso,
+  referenciados sin definir (distinguiendo los que solo aparecen en filtros
+  dinámicos, que pueden ser tags registrados en runtime), duplicados por
+  nombre entre ámbitos o solo por mayúsculas, inventario con uso en reglas,
+  objetos y filtros de address-groups dinámicos, y cobertura de tags en las
+  reglas de security. Se incluye en las exportaciones JSON y CSV.
+- El índice genérico de referencias ya no indexa las listas `<tag>` /
+  `<group-tag>` de las reglas (son nombres de tag, no de objetos), para que un
+  tag tapado por uno homónimo no parezca en uso.
+
+**Pendiente de validar con datos reales**: el módulo se probó contra
+configuraciones y respuestas de SCM simuladas. En la primera corrida contra
+un tenant real conviene confirmar el `device_type` de Panorama y los hosts de
+SCM.
+
 ## Novedades de v0.3.1 (sobre v0.3.0)
 
 Corrección: **el stats dump ya no se rinde por tiempo**. En v0.3.0 la espera

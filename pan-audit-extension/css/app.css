@@ -189,6 +189,35 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .peligro-grande { padding: 8px 20px; font-size: 13px; }
 .peligro:disabled { background: #d9a5a2; border-color: #d9a5a2; cursor: not-allowed; }
 .panel .d-check, .panel .d-check-tipo { width: auto; margin: 0; cursor: pointer; }
+.acciones-sinuso .campo-limite {
+  display: inline-flex; align-items: center; gap: 6px; margin: 0;
+  font-size: 12px; font-weight: 600; color: var(--tenue);
+}
+.acciones-sinuso .campo-limite input { width: 72px; padding: 4px 6px; }
+.acciones-sinuso .campo-limite input.aviso { border-color: var(--warn); color: var(--warn); }
+
+/* --- balance de depuracion (antes / despues de cada sesion) --- */
+.balance-depuracion {
+  margin: 12px 12px 4px; padding: 10px 12px;
+  border: 1px solid var(--borde); border-radius: 8px; background: #fff;
+}
+.balance-cabecera { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--azul); }
+.balance-cabecera .separador { flex: 1; }
+.balance-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px;
+  margin-top: 8px;
+}
+.balance-item { background: var(--fondo); border-radius: 6px; padding: 8px 10px; }
+.balance-item .lbl { font-size: 11px; color: var(--tenue); }
+.balance-item .num { font-size: 20px; font-weight: 700; margin-top: 2px; }
+.balance-item.principal .num { color: var(--azul); }
+.balance-item .sub { font-size: 11px; color: var(--tenue); margin-top: 2px; }
+.balance-nota { margin: 8px 0 0; font-size: 12px; color: var(--tenue); }
+.balance-nota.ok { color: var(--ok); }
+.balance-nota.warn { color: var(--warn); }
+.balance-historial { margin-top: 8px; font-size: 12px; }
+.balance-historial summary { cursor: pointer; color: var(--azul); font-weight: 600; }
+.balance-historial table { margin-top: 6px; }
 
 /* --- formularios (backups / hardening) --- */
 fieldset { border: 1px solid var(--borde); border-radius: 8px; padding: 14px 16px; margin: 0 0 16px; }
@@ -367,3 +396,16 @@ textarea.comandos {
   line-height: 1.7; margin-bottom: 14px;
 }
 .aviso-certificado a { color: #7a4a00; }
+
+/* --- best practices --- */
+.check .meta { color: var(--tenue); font-size: 12px; }
+.check.deshabilitado { color: var(--tenue); cursor: not-allowed; }
+.bp-titulo-tabla { margin: 18px 0 8px; font-size: 13px; color: var(--azul); }
+.bp-pct { display: flex; align-items: center; gap: 8px; }
+.bp-pct .pista { flex: 1; min-width: 60px; height: 8px; border-radius: 4px; background: #e3e8f0; }
+.bp-pct .relleno { height: 8px; border-radius: 4px; }
+.bp-pct .valor { font-weight: 600; font-size: 12px; min-width: 44px; font-variant-numeric: tabular-nums; }
+.tarjeta.ok .num { color: var(--ok); }
+.tarjeta.falla .num { color: var(--error); }
+.tarjeta.principal .num { color: var(--azul); }
+.nota-bpa { margin: 10px 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

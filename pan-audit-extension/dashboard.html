@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <title>PAN Helper v0.3.1 — Dashboard</title>
+  <title>PAN Helper v0.4.0 — Dashboard</title>
   <link rel="stylesheet" href="css/nav.css" />
   <link rel="stylesheet" href="css/app.css" />
 </head>
@@ -15,7 +15,7 @@
     <nav class="menu" id="menu">
       <button class="menu-item activo" data-modulo="auditoria">
         Auditoria
-        <span>Reglas deshabilitadas, objetos sin uso, malas practicas</span>
+        <span>Reglas deshabilitadas, objetos sin uso, tags, malas practicas</span>
       </button>
       <button class="menu-item" data-modulo="backups">
         Backups
@@ -32,6 +32,10 @@
       <button class="menu-item" data-modulo="certificados">
         Certificados
         <span>Control de vencimiento</span>
+      </button>
+      <button class="menu-item" data-modulo="bestpractices">
+        Best Practices
+        <span>Reporte BPA de buenas practicas</span>
       </button>
       <div class="menu-nota">
         Todos los modulos usan las conexiones guardadas — no vuelves a
@@ -52,10 +56,11 @@
         <p class="descripcion">
           Descarga la configuracion y la analiza en el navegador: reglas
           deshabilitadas, objetos sin uso (con cascada de grupos), duplicados,
-          posibles sombras y malas practicas en las politicas. En "Objetos sin
-          uso" puedes marcar los que sobran y eliminarlos con
+          posibles sombras, malas practicas en las politicas y uso de tags. En
+          "Objetos sin uso" puedes marcar los que sobran y eliminarlos con
           <strong>Depurar</strong> — siempre en la candidate config, con
-          confirmacion previa y sin commit.
+          confirmacion previa, sin commit y en lotes con un maximo de borrados
+          por sesion.
         </p>
 
         <div class="barra-controles">
@@ -80,6 +85,7 @@
             <button data-tab="duplicated" class="tab">Objetos duplicados</button>
             <button data-tab="shadowed" class="tab">Posibles sombras</button>
             <button data-tab="bestpractice" class="tab">Buenas practicas</button>
+            <button data-tab="tags" class="tab">Tags</button>
           </nav>
 
           <section id="a-panel-disabled" class="panel"></section>
@@ -87,6 +93,7 @@
           <section id="a-panel-duplicated" class="panel oculto"></section>
           <section id="a-panel-shadowed" class="panel oculto"></section>
           <section id="a-panel-bestpractice" class="panel oculto"></section>
+          <section id="a-panel-tags" class="panel oculto"></section>
         </div>
       </section>
 
@@ -477,6 +484,168 @@
         </form>
 
         <div id="c-resultado"></div>
+      </section>
+
+      <!-- ---------- modulo: best practices ---------- -->
+      <section id="modulo-bestpractices" class="modulo">
+        <h2>Best Practice Assessment
+          <span class="etiqueta-plataforma">firewall / Panorama</span></h2>
+        <p class="descripcion">
+          Genera el reporte de buenas practicas de Palo Alto: cumplimiento
+          general, fallas por severidad y por categoria, hallazgos y el detalle
+          de cada check.
+        </p>
+
+        <form id="form-bpa" novalidate>
+          <fieldset>
+            <legend>Origen</legend>
+            <label class="check">
+              <input type="radio" name="bp-origen" value="json" checked>
+              <span>JSON de BPA existente
+                <span class="meta">— el resultado que ya descargaste de Strata Cloud Manager</span></span>
+            </label>
+            <label class="check">
+              <input type="radio" name="bp-origen" value="scm">
+              <span>Palo Alto SCM Posture API
+                <span class="meta">— sube el running-config a la nube de Palo Alto y trae el BPA oficial</span></span>
+            </label>
+            <label class="check">
+              <input type="radio" name="bp-origen" value="local">
+              <span>Evaluacion local
+                <span class="meta">— 45 checks propios de PAN Helper sobre el XML, sin salir del navegador (no es el BPA oficial)</span></span>
+            </label>
+          </fieldset>
+
+          <!-- origen: JSON existente -->
+          <fieldset id="bp-campos-json">
+            <legend>Archivo</legend>
+            <div>
+              <label for="bp-json">JSON del BPA</label>
+              <input type="file" id="bp-json" accept=".json,application/json">
+              <p class="nota-campo">Se lee en tu navegador; no se envia a ningun lado.</p>
+            </div>
+          </fieldset>
+
+          <!-- configuracion: la evaluan SCM y local; con JSON es opcional (Security Profile Groups) -->
+          <div id="bp-campos-config">
+            <fieldset>
+              <legend id="bp-config-legend">Configuracion a evaluar</legend>
+              <p id="bp-config-nota" class="nota oculto">
+                Opcional, solo para el Excel: el JSON del BPA no trae la definicion de los
+                Security Profile Groups. Con la configuracion del mismo equipo se resuelven;
+                sin ella, las reglas que usan grupos quedan fuera de 'Habilitado' y 'En BP Mode'.
+                Se lee solo en tu navegador.
+              </p>
+              <label class="check oculto" id="bp-fuente-ninguna">
+                <input type="radio" name="bp-fuente" value="ninguna">
+                <span>No usar configuracion</span>
+              </label>
+              <label class="check">
+                <input type="radio" name="bp-fuente" value="conexion" checked>
+                <span>Descargar la running config de una conexion guardada</span>
+              </label>
+              <label class="check">
+                <input type="radio" name="bp-fuente" value="archivo">
+                <span>Subir un running-config.xml</span>
+              </label>
+              <div id="bp-fuente-conexion" style="margin-top:8px;">
+                <label for="bp-target">Conexion</label>
+                <select id="bp-target"></select>
+              </div>
+              <div id="bp-fuente-archivo" class="oculto" style="margin-top:8px;">
+                <label for="bp-scm-xml">running-config.xml (sin comprimir)</label>
+                <input type="file" id="bp-scm-xml" accept=".xml,application/xml,text/xml">
+                <p class="nota-campo">Device &gt; Setup &gt; Operations &gt; Export named configuration snapshot.</p>
+              </div>
+            </fieldset>
+          </div>
+
+          <!-- origen: SCM Posture API -->
+          <div id="bp-campos-scm" class="oculto">
+            <div class="aviso-certificado">
+              <strong>La configuracion sale de tu equipo.</strong> Este origen sube el
+              running-config completo a Strata Cloud Manager (nube de Palo Alto) para que
+              Palo Alto calcule el BPA. El XML incluye la topologia y la politica del
+              cliente, y secretos cifrados o con hash. Usalo solo si el cliente lo autoriza.
+            </div>
+
+            <fieldset>
+              <legend>Equipo</legend>
+              <div class="fila">
+                <div>
+                  <label for="bp-tipo">Tipo de equipo</label>
+                  <select id="bp-tipo">
+                    <option value="auto">Detectar desde la configuracion</option>
+                    <option value="NGFW">Firewall (NGFW)</option>
+                    <option value="Panorama">Panorama</option>
+                  </select>
+                </div>
+                <div>
+                  <label for="bp-modelo">Modelo</label>
+                  <input type="text" id="bp-modelo" value="PA-5220">
+                  <p class="nota-campo">Normalmente no cambia el resultado del assessment.</p>
+                </div>
+              </div>
+            </fieldset>
+
+            <fieldset>
+              <legend>Service account de SCM</legend>
+              <p class="nota">
+                Se usan solo durante esta ejecucion y se descartan: la extension no los
+                guarda. El Client Secret se borra del formulario al terminar.
+              </p>
+              <div class="fila">
+                <div>
+                  <label for="bp-client-id">Client ID</label>
+                  <input type="text" id="bp-client-id" autocomplete="off" spellcheck="false"
+                         placeholder="nombre@TSG.iam.panserviceaccount.com">
+                </div>
+                <div>
+                  <label for="bp-client-secret">Client Secret</label>
+                  <input type="password" id="bp-client-secret" autocomplete="new-password" spellcheck="false">
+                </div>
+              </div>
+              <label class="check" style="margin-top:10px;">
+                <input type="checkbox" id="bp-borrar" checked>
+                Pedir a SCM que borre la configuracion al terminar de procesarla
+              </label>
+              <label class="check">
+                <input type="checkbox" id="bp-guardar-json" checked>
+                Guardar tambien el JSON del BPA (para regenerar reportes sin volver a subir)
+              </label>
+              <label class="check">
+                <input type="checkbox" id="bp-acepto">
+                <strong>Entiendo que la configuracion se enviara a Palo Alto Networks.</strong>
+              </label>
+            </fieldset>
+          </div>
+
+          <fieldset>
+            <legend>Salida</legend>
+            <div style="margin-bottom:10px;">
+              <label for="bp-cliente">Cliente</label>
+              <input type="text" id="bp-cliente" placeholder="Nombre para el titulo del reporte">
+            </div>
+            <label class="check">
+              <input type="checkbox" id="bp-html" checked>
+              Descargar reporte HTML
+            </label>
+            <label class="check">
+              <input type="checkbox" id="bp-excel" checked>
+              Descargar Excel (Resumen, Hallazgos, Reglas, BP Mode, Perfiles, Zonas, Certificados...)
+            </label>
+            <p class="nota">Los archivos van a <code>Descargas/PAN-Helper/best-practices/</code>.</p>
+          </fieldset>
+
+          <div class="acciones">
+            <button type="submit" id="bp-btn" class="primario">Generar reporte</button>
+            <span id="bp-progreso" class="progreso"></span>
+            <button type="button" id="bp-btn-html" class="secundario oculto">Descargar HTML</button>
+            <button type="button" id="bp-btn-excel" class="secundario oculto">Descargar Excel</button>
+          </div>
+        </form>
+
+        <div id="bp-resultado"></div>
       </section>
 
       <!-- ---------- consola (siempre visible) ---------- -->

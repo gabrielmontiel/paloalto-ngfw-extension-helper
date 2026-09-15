@@ -221,7 +221,9 @@ const EXTRA_POLICY_TYPES = [
   "application-override", "dos", "sdwan", "tunnel-inspect",
 ];
 
-function collectExtraPolicyRules(scope) {
+// Contenedores de politicas de un ambito: <rulebase> (vsys) o
+// <pre-rulebase> / <post-rulebase> (shared y device-groups de Panorama).
+function rulebaseContainers(scope) {
   const containers = [];
   const single = child(scope.element, "rulebase");
   if (single) containers.push(single);
@@ -229,9 +231,12 @@ function collectExtraPolicyRules(scope) {
     const rb = child(scope.element, tag);
     if (rb) containers.push(rb);
   }
+  return containers;
+}
 
+function collectExtraPolicyRules(scope) {
   const out = [];
-  for (const cont of containers) {
+  for (const cont of rulebaseContainers(scope)) {
     for (const tipo of EXTRA_POLICY_TYPES) {
       const rules = child(child(cont, tipo), "rules");
       if (!rules) continue;
@@ -265,6 +270,11 @@ function buildReferenceIndex(configEl, log) {
   const walk = (el, ruta) => {
     for (const c of el.children) {
       if (EXCLUIR.has(c.tagName)) continue;
+      // Listas de tags de reglas (<tag><member>, <group-tag>): el analisis de
+      // tags las resuelve por ambito; indexarlas haria que un tag tapado por
+      // otro homonimo pareciera en uso. No contienen nombres de objetos.
+      // (El <tag>100</tag> de una subinterfaz no lleva <member> y se indexa.)
+      if (c.tagName === "group-tag" || (c.tagName === "tag" && child(c, "member"))) continue;
       const name = c.getAttribute ? c.getAttribute("name") : null;
       const seg = name ? `${c.tagName} '${name}'` : c.tagName;
       if (c.children.length === 0) {
@@ -325,10 +335,12 @@ export function runAudit(configEl, log = () => {}) {
 
   const objectsByScope = new Map();
   let totalObjetos = 0;
+  const objetosPorTipo = Object.fromEntries(KINDS.map((k) => [k, 0]));
   for (const scope of allScopes.values()) {
     const objs = collectObjectsInScope(scope);
     objectsByScope.set(scope.id, objs);
     const n = KINDS.reduce((acc, k) => acc + objs[k].size, 0);
+    for (const k of KINDS) objetosPorTipo[k] += objs[k].size;
     totalObjetos += n;
     if (n) log(`${scope.label}: ${n} objeto(s) address/service.`, "debug");
   }
@@ -398,23 +410,32 @@ export function runAudit(configEl, log = () => {}) {
   const unusedObjects = collectUnusedObjects(allScopes, objectsByScope, esUsado, memberOf, log);
   const duplicateObjects = collectDuplicateObjects(allScopes, objectsByScope, esUsado, log);
   const possiblyShadowedRules = findPossibleShadows(rulebaseGroups);
+  const tags = analizarTags(allScopes, objectsByScope, referenceIndex, log);
 
   return {
     deviceEntryName,
     summary: {
       scopeCount: scopes.length,
       totalRulesAudited: rulebaseGroups.reduce((n, g) => n + g.rules.length, 0),
+      // Objetos address/service (y sus grupos) definidos en la config: la
+      // base del balance "antes / despues" de cada sesion de depuracion.
+      totalObjectCount: totalObjetos,
+      objectCountByKind: objetosPorTipo,
       disabledRuleCount: disabledRules.length,
       unusedObjectCount: unusedObjects.length,
       duplicateObjectCount: duplicateObjects.length,
       possiblyShadowedCount: possiblyShadowedRules.length,
       bestPracticeFindingCount: bestPractice.length,
+      tagCount: tags.definidos.length,
+      unusedTagCount: tags.definidos.filter((t) => !t.enUso).length,
+      undefinedTagCount: tags.noDefinidos.length,
     },
     disabledRules,
     unusedObjects,
     duplicateObjects,
     possiblyShadowedRules,
     bestPractice,
+    tags,
   };
 }
 
@@ -726,6 +747,187 @@ function collectDuplicateObjects(allScopes, objectsByScope, esUsado, log) {
   }
 
   return duplicados;
+}
+
+// ---------- tags ----------
+
+// Tags de un filtro de address-group dinamico: 'tag1' and ('tag 2' or tag3).
+// Los nombres con espacios van entre comillas simples o dobles; los
+// operadores and/or/not no son tags.
+export function tagsDeFiltro(filtro) {
+  const tags = new Set();
+  const re = /'([^']*)'|"([^"]*)"|([^\s()'"]+)/g;
+  let m;
+  while ((m = re.exec(filtro || ""))) {
+    const t = (m[1] ?? m[2] ?? m[3] ?? "").trim();
+    if (!t) continue;
+    if (m[3] !== undefined && /^(and|or|not)$/i.test(t)) continue;
+    tags.add(t);
+  }
+  return [...tags];
+}
+
+const MAX_EJEMPLOS = 5;
+
+// Analisis de tags, solo lectura:
+//  - inventario: cada tag definido con cuantas reglas, objetos y filtros de
+//    address-groups dinamicos lo usan (resolviendo por ambito, igual que los
+//    objetos: el tag debe estar definido en el ambito o en un ancestro);
+//  - sin uso: definidos que nada referencia, ni en politicas, ni en objetos,
+//    ni en filtros dinamicos, ni en el resto de la config (indice generico,
+//    conservador como en objetos);
+//  - referenciados sin definir: usados en reglas u objetos sin objeto tag
+//    alcanzable. Si solo aparecen en filtros dinamicos pueden ser tags
+//    registrados en runtime (User-ID, VM Information Sources), no un error;
+//  - duplicados: mismo nombre en varios ambitos, o nombres que solo
+//    difieren en mayusculas ("Prod" / "prod");
+//  - cobertura: cuantas reglas de security llevan al menos un tag.
+function analizarTags(allScopes, objectsByScope, referenceIndex, log) {
+  const tagsByScope = new Map();
+  for (const scope of allScopes.values()) {
+    tagsByScope.set(scope.id, indexEntries(child(scope.element, "tag")));
+  }
+
+  // clave del tag definido -> contadores de uso
+  const uso = new Map();
+  const noDefinidos = new Map(); // nombre -> { referencias, ejemplos, soloEnFiltros }
+
+  const registrar = (nombre, scope, tipoUso, donde) => {
+    let definido = null;
+    for (const s of scopeChain(scope)) {
+      if (tagsByScope.get(s.id).has(nombre)) {
+        definido = s;
+        break;
+      }
+    }
+
+    if (!definido) {
+      if (!noDefinidos.has(nombre)) {
+        noDefinidos.set(nombre, { name: nombre, referencias: 0, ejemplos: [], soloEnFiltros: true });
+      }
+      const nd = noDefinidos.get(nombre);
+      nd.referencias++;
+      if (tipoUso !== "filtros") nd.soloEnFiltros = false;
+      if (nd.ejemplos.length < MAX_EJEMPLOS) nd.ejemplos.push(donde);
+      return;
+    }
+
+    const clave = `${definido.id}::${nombre}`;
+    if (!uso.has(clave)) uso.set(clave, { reglas: 0, objetos: 0, filtros: 0, ejemplos: [] });
+    const u = uso.get(clave);
+    u[tipoUso]++;
+    if (u.ejemplos.length < MAX_EJEMPLOS) u.ejemplos.push(donde);
+  };
+
+  let reglasSecurity = 0;
+  let reglasSecurityConTag = 0;
+
+  for (const scope of allScopes.values()) {
+    // Politicas del ambito (security y el resto de tipos).
+    for (const cont of rulebaseContainers(scope)) {
+      for (const tipo of ["security", ...EXTRA_POLICY_TYPES]) {
+        const rules = child(child(cont, tipo), "rules");
+        for (const entry of children(rules, "entry")) {
+          const tagsRegla = memberList(child(entry, "tag"));
+          const groupTag = textOf(child(entry, "group-tag"));
+          if (tipo === "security") {
+            reglasSecurity++;
+            if (tagsRegla.length) reglasSecurityConTag++;
+          }
+          const donde = `${scope.label} / ${cont.tagName} / ${tipo} '${entryName(entry)}'`;
+          for (const t of new Set([...tagsRegla, ...(groupTag ? [groupTag] : [])])) {
+            registrar(t, scope, "reglas", donde);
+          }
+        }
+      }
+    }
+
+    // Objetos del ambito y filtros de address-groups dinamicos.
+    const objs = objectsByScope.get(scope.id);
+    for (const kind of KINDS) {
+      for (const [name, entryEl] of objs[kind]) {
+        const donde = `${scope.label} / ${kind} '${name}'`;
+        for (const t of memberList(child(entryEl, "tag"))) registrar(t, scope, "objetos", donde);
+
+        if (kind === "address-group") {
+          const filtro = textOf(child(child(entryEl, "dynamic"), "filter"));
+          for (const t of tagsDeFiltro(filtro)) registrar(t, scope, "filtros", `${donde} (filtro dinamico)`);
+        }
+      }
+    }
+  }
+
+  // --- inventario de tags definidos ---
+  const definidos = [];
+  for (const scope of allScopes.values()) {
+    for (const [name, entryEl] of tagsByScope.get(scope.id)) {
+      const u = uso.get(`${scope.id}::${name}`) || { reglas: 0, objetos: 0, filtros: 0, ejemplos: [] };
+      const directos = u.reglas + u.objetos + u.filtros;
+      // Sin uso directo: se busca el nombre en el resto de la config (log
+      // forwarding con tagging, templates...). Ante la duda, en uso.
+      const otrasReferencias = directos ? [] : referenceIndex.get(name) || [];
+
+      definidos.push({
+        scope: scope.label,
+        scopeKind: scope.kind,
+        scopeName: scope.name,
+        name,
+        color: textOf(child(entryEl, "color")),
+        comments: textOf(child(entryEl, "comments")),
+        reglas: u.reglas,
+        objetos: u.objetos,
+        filtrosDinamicos: u.filtros,
+        otrasReferencias,
+        ejemplos: u.ejemplos,
+        enUso: directos > 0 || otrasReferencias.length > 0,
+      });
+    }
+  }
+  definidos.sort((a, b) => a.scope.localeCompare(b.scope) || a.name.localeCompare(b.name));
+
+  // --- duplicados ---
+  const porNombre = new Map();
+  const porMinusculas = new Map();
+  for (const t of definidos) {
+    if (!porNombre.has(t.name)) porNombre.set(t.name, []);
+    porNombre.get(t.name).push(t);
+    const k = t.name.toLowerCase();
+    if (!porMinusculas.has(k)) porMinusculas.set(k, []);
+    porMinusculas.get(k).push(t);
+  }
+
+  const duplicados = [];
+  for (const [name, lista] of porNombre) {
+    if (lista.length < 2) continue;
+    duplicados.push({
+      criterio: "nombre",
+      clave: name,
+      ocurrencias: lista.map((t) => ({ scope: t.scope, name: t.name, enUso: t.enUso })),
+    });
+  }
+  for (const [k, lista] of porMinusculas) {
+    if (new Set(lista.map((t) => t.name)).size < 2) continue;
+    duplicados.push({
+      criterio: "mayusculas",
+      clave: k,
+      ocurrencias: lista.map((t) => ({ scope: t.scope, name: t.name, enUso: t.enUso })),
+    });
+  }
+
+  const listaNoDefinidos = [...noDefinidos.values()].sort((a, b) => a.name.localeCompare(b.name));
+
+  log(
+    `Tags: ${definidos.length} definido(s), ${definidos.filter((t) => !t.enUso).length} sin uso, ` +
+      `${listaNoDefinidos.length} referenciado(s) sin definir, ${duplicados.length} duplicado(s).`,
+    "debug"
+  );
+
+  return {
+    definidos,
+    noDefinidos: listaNoDefinidos,
+    duplicados,
+    cobertura: { reglasSecurity, reglasSecurityConTag },
+  };
 }
 
 // ---------- buenas practicas ----------

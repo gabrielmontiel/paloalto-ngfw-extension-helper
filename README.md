@@ -3,7 +3,9 @@
 Extensión de navegador para operar y auditar firewalls **Palo Alto PAN-OS** y
 **Panorama**. Todo corre dentro de Chrome: no hay servidor, no hay Python que
 instalar y ningún dato sale de tu equipo salvo hacia el firewall que tú
-indicas.
+indicas. La única excepción es opcional y explícita: el Best Practice
+Assessment oficial, que sube la configuración a Strata Cloud Manager solo si
+eliges ese origen y lo confirmas.
 
 Nació de un conjunto de scripts de Python que había que ejecutar a mano, con
 las credenciales en un Excel y la API key escrita en el propio código. Aquí
@@ -21,6 +23,7 @@ la herramienta **no puede hacer commit**.
 | **Hardening App-ID** | Descubre qué aplicaciones usa realmente cada regla y crea la versión endurecida de la política. |
 | **API Keys** | Obtiene la API key de muchos equipos a la vez y arma un inventario con hostname, serial, modelo y versión. |
 | **Certificados** | Revisa los certificados de todo el parque y los agrupa por urgencia de vencimiento. |
+| **Best Practices** | Genera el Best Practice Assessment en HTML y Excel: desde un JSON de BPA, pidiéndolo a Strata Cloud Manager, o con una evaluación local de 45 checks que no sale del navegador. |
 
 ## El principio que ordena todo: sin commit
 
@@ -82,6 +85,7 @@ La cuenta necesita un **Admin Role Profile** con acceso XML API a:
 |---|---|
 | Auditoría, Backups, Certificados | **Configuration** (lectura), **Operational Requests** |
 | Hardening App-ID | además **Log** y **Report** |
+| Best Practices desde una conexión | **Configuration** (lectura), **Operational Requests** |
 | Clonar y ajustar | además REST → Policies → Security Rules (escritura) |
 | Depurar objetos | además REST → Objects (escritura) |
 
@@ -97,7 +101,7 @@ Elige una conexión, decide si analizar la **running config** (lo activo) o la
 **candidate** (lo que está en staging sin commit), y pulsa **Auditar**. La
 configuración se descarga y se analiza entera en tu navegador.
 
-Cinco pestañas de resultados:
+Seis pestañas de resultados:
 
 - **Reglas deshabilitadas** — toda regla con `disabled = yes`.
 - **Objetos sin uso** — address, services y grupos que no aparecen en ninguna
@@ -107,6 +111,10 @@ Cinco pestañas de resultados:
 - **Posibles sombras** — reglas que quedan inalcanzables por una anterior.
 - **Buenas prácticas** — `any` en reglas allow, sin perfil de seguridad, sin
   log, sin tags.
+- **Tags** — tags sin uso, referenciados sin definir, duplicados (mismo
+  nombre en varios ámbitos o solo distinto en mayúsculas), inventario con su
+  uso en reglas, objetos y filtros de address-groups dinámicos, y qué
+  porcentaje de las reglas de security lleva tag. Solo lectura.
 
 Exporta los hallazgos a JSON o CSV, o el XML crudo de la configuración.
 
@@ -117,9 +125,14 @@ El caso típico tras años de acumulación.
 1. **Auditar** → pestaña **Objetos sin uso**
 2. Los chips de arriba (`address-group 4`, `address 37`…) saltan a cada
    sección. El orden es el **orden seguro de eliminación**: grupos primero.
-3. Marca lo que quieras eliminar y pulsa **Depurar**
-4. El popup lista exactamente qué se va a borrar. Confirma.
-5. **Revisa en la GUI del firewall y haz commit tú**
+3. Marca lo que quieras eliminar y ajusta **Máx. borrados por sesión**
+   (100 por defecto)
+4. Pulsa **Depurar**. El popup lista exactamente qué se va a borrar en esta
+   sesión y cuántos quedan pendientes. Confirma.
+5. Revisa el **Balance de depuración** y, si quieres, **Recontar desde la
+   candidate** para verificarlo contra el equipo
+6. Pulsa **Depurar** otra vez para el siguiente lote; lo pendiente sigue marcado
+7. **Revisa en la GUI del firewall y haz commit tú**
 
 Qué resuelve por ti:
 
@@ -129,6 +142,13 @@ Qué resuelve por ti:
   calculando el orden por dependencias, así que funciona con grupos anidados.
 - Si quitar un objeto dejaría un grupo estático vacío (PAN-OS no lo admite),
   lo omite y te dice que marques también el grupo.
+- Reparte la selección en **lotes**: borrar más de ~200 objetos de una vez ha
+  llegado a tumbar el firewall. Cada lote respeta el orden seguro, y el popup
+  avisa si pones un máximo por encima de 200.
+- Lleva el **balance**: objetos en la config y sin uso antes y después de la
+  sesión, y cuánto llevas depurado en ese equipo (historial local por equipo,
+  con cada sesión). Solo cuenta lo escrito en la candidate: un revert en la
+  GUI no se refleja en el historial.
 
 > **Qué significa "sin uso" aquí:** se verifica contra security, NAT
 > (incluidas direcciones traducidas), decryption, QoS, PBF, authentication,
@@ -246,6 +266,83 @@ Los umbrales (30 y 90 días) son configurables. En un firewall consulta los
 compartidos y, si es multi-vsys, los de cada vsys; en Panorama recorre los
 templates más los del propio Panorama.
 
+## Best Practices
+
+Genera el reporte de buenas prácticas en **HTML** (dashboard autocontenido,
+para revisar en el navegador o adjuntar a un correo) y en **Excel** (Resumen,
+Hallazgos, Adopción de seguridad, Reglas, BP Mode con gráfico de radar,
+Decryption, Certificados, Zonas, Perfiles, Plataforma y Detalle). Tres
+orígenes, un mismo reporte:
+
+| Origen | Qué necesita | ¿Sale la configuración del equipo? |
+|---|---|---|
+| **JSON de BPA existente** | el JSON que ya bajaste de Strata Cloud Manager | No |
+| **Palo Alto SCM Posture API** | un service account de SCM y la running config | **Sí, a la nube de Palo Alto** |
+| **Evaluación local** | la running config | No |
+
+La running config se toma de una **conexión guardada** o de un
+`running-config.xml` (Device > Setup > Operations > Export named
+configuration snapshot).
+
+```
+Descargas/PAN-Helper/best-practices/
+    BPA_ACME_202609151430.html
+    BPA_ACME_202609151430.xlsx
+    BPA_ACME_202609151430.json      (solo origen SCM: el resultado crudo)
+```
+
+### JSON de BPA existente
+
+Carga el JSON y, opcionalmente, la configuración del mismo equipo: desde su
+**conexión guardada** o desde un `running-config.xml`. El JSON del BPA no trae
+la definición de los **Security Profile Groups**; sin la configuración, las
+reglas que usan grupos quedan fuera de "Habilitado" y "En BP Mode".
+Con el XML se resuelven, y en la hoja Perfiles un perfil que solo se usa
+dentro de un grupo aparece como **"Sí (grupo)"** en vez de "No".
+
+Si el JSON no trae `adoption` / `adoption_summary` (la API de SCM no siempre
+los devuelve), Reglas, Adopción y BP Mode se reconstruyen desde la
+configuración de las reglas, y el reporte lo indica.
+
+### Palo Alto SCM Posture API
+
+Pide a Palo Alto el BPA **oficial**: la extensión obtiene un token con tu
+service account, sube la configuración, espera el procesamiento (sin tope y
+cancelable con **Cancelar llamadas**) y descarga el resultado.
+
+- Hay que **marcar la confirmación** de que la configuración se enviará a
+  Palo Alto; sin ella no se hace ninguna petición.
+- **Client ID y Client Secret se escriben en cada uso**, viven solo en memoria
+  y el secret se borra del formulario al terminar. Nunca se guardan.
+- El tipo de equipo (firewall o Panorama) se detecta desde la configuración.
+- Por defecto se pide a SCM que **borre la configuración** al procesarla, y se
+  guarda el JSON crudo para regenerar reportes sin volver a subir.
+- Chrome pide permiso, la primera vez, para `auth.apps.paloaltonetworks.com`,
+  `api.sase.paloaltonetworks.com` y `storage.googleapis.com` (donde SCM recibe
+  el archivo). Cualquier otro destino se bloquea antes de conectarse.
+
+### Evaluación local
+
+45 checks propios de PAN Helper, evaluados **en el navegador**. **No es el
+BPA oficial** —que tiene muchos más controles y datos que no están en el
+XML— y el reporte lo dice en su encabezado.
+
+| Grupo | Checks |
+|---|---|
+| Reglas de seguridad | any/any/any/any, App-ID, service, perfiles de seguridad, log-end, log forwarding, descripción, tags, log en reglas por defecto |
+| Descifrado | existe regla decrypt, Decryption profile asignado, TLS ≥ 1.2, bloqueo de certificados vencidos y no confiables |
+| Perfiles | Antivirus (reset-both, WildFire), Anti-Spyware (severidades, DNS sinkhole), Vulnerability, URL Filtering (categorías, robo de credenciales), File Blocking, WildFire |
+| Zonas | Zone Protection asignado, Packet Buffer Protection, flood protection |
+| Administración | Telnet/HTTP, permitted-ip, complejidad de contraseñas (≥ 12), password profiles, cuenta `admin`, superusuarios con auth profile, idle timeout (≤ 15 min), lockout, banner, NTP, SNMP v3, reenvío de logs |
+| Actualizaciones | Antivirus, Aplicaciones y Amenazas, WildFire |
+| Alta disponibilidad | HA, link/path monitoring, sincronización de configuración |
+| Certificados | vencidos, por vencer (≤ 90 días) |
+
+En Panorama recorre shared y los device-groups (reglas y perfiles), los
+templates (zonas, administración, actualizaciones, HA) y el propio Panorama.
+**En un template, lo que no está definido no cuenta como falla**: se reporta
+como "no aplica", porque el firewall puede tenerlo configurado localmente.
+
 ---
 
 ## Seguridad
@@ -253,11 +350,12 @@ templates más los del propio Panorama.
 | | |
 |---|---|
 | **Dependencias de terceros** | Ninguna. Sin `package.json`, sin CDN. |
-| **Backend / telemetría** | No hay. El único tráfico es navegador → firewall. |
+| **Backend / telemetría** | No hay. El tráfico es navegador → firewall, salvo el origen SCM de Best Practices (navegador → Palo Alto), que es opcional y requiere confirmación. |
 | **Contraseñas** | Se usan una vez para obtener la API key y se descartan. Nunca se guardan. |
+| **Service account de SCM** | Se escribe en cada uso, vive solo en memoria y no se guarda. Nunca aparece en el registro. |
 | **API keys** | En `chrome.storage.local`, **en texto plano**. |
 | **En tránsito** | Solo HTTPS. La contraseña va en el cuerpo del POST, nunca en la URL. |
-| **Permisos** | `storage` y `downloads`. El acceso a cada firewall se concede por host en tiempo de ejecución. |
+| **Permisos** | `storage` y `downloads`. El acceso a cada firewall —y a Strata Cloud Manager, si lo usas— se concede por host en tiempo de ejecución. |
 | **Trazabilidad** | Cada acción queda en los logs de PAN-OS con el usuario real del ingeniero. |
 
 ### Riesgos que conviene conocer
@@ -270,6 +368,9 @@ templates más los del propio Panorama.
   quedan **sin protección** en tu carpeta de Descargas. El XML de una
   configuración incluye hashes de contraseñas de administradores y material
   criptográfico.
+- El origen **SCM** de Best Practices **sube la configuración completa del
+  cliente a Palo Alto**. Úsalo solo con autorización del cliente; los otros
+  dos orígenes no envían nada.
 
 ## Limitaciones conocidas
 
@@ -285,6 +386,11 @@ templates más los del propio Panorama.
   verificar, no como veredicto.
 - El `topn` del Custom Report **limita la muestra**: una aplicación muy
   minoritaria puede quedar fuera. Para exhaustividad, usa la vía de logs.
+- La **evaluación local de Best Practices** solo ve la configuración: no ve
+  licencias, versiones de contenido instaladas ni tráfico. Los perfiles
+  predefinidos (`default`, `strict`) no están en el XML y no se evalúan. Si una
+  zona no define Packet Buffer Protection explícitamente, se reporta "no
+  aplica": el valor por defecto depende de la versión de PAN-OS.
 
 ## Estado de madurez
 
@@ -293,6 +399,12 @@ verificado contra equipos reales. El resto está cubierto por pruebas
 automatizadas contra firewalls simulados, pero **los caminos de escritura
 (clonar, depurar) y el soporte de Panorama no tienen aún rodaje en
 producción**. Pruébalos en laboratorio antes de usarlos con un cliente.
+
+**Best Practices** está validado contra el script Python del que proviene
+(mismo resultado celda por celda en el Excel) y con configuraciones y
+respuestas de SCM simuladas, pero **aún no contra un BPA ni un tenant de SCM
+reales**. En particular, conviene confirmar en la primera corrida real el
+valor de `device_type` para Panorama y los hosts de SCM.
 
 ---
 

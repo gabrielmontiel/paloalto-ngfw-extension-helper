@@ -21,6 +21,12 @@
 //     miembros. Si quitar lo marcado dejaria el grupo vacio y el grupo no
 //     fue marcado, esos objetos se omiten con un mensaje que dice que hay
 //     que marcar tambien el grupo. Se detecta antes de tocar la red.
+//
+//  4. LOTES POR SESION. Borrar cientos de objetos de una vez (con mas de
+//     ~200 se ha visto caer el firewall) se evita con un maximo de borrados
+//     por sesion. El lote es un PREFIJO del orden por dependencias, asi que
+//     nunca incluye un miembro sin el grupo marcado que lo contiene; el resto
+//     queda pendiente para la siguiente sesion.
 
 import {
   eliminarObjeto,
@@ -40,13 +46,16 @@ const claveGrupo = (g) => `${g.scopeLabel}::${g.kind}::${g.name}`;
  * advertencia con datos exactos.
  *
  * @param {Array<object>} seleccion  objetos de result.unusedObjects
- * @returns {{ediciones: Array, aBorrar: Array, bloqueados: Array}}
+ * @param {number} [limite]  maximo de objetos a borrar en esta sesion
+ * @returns {{ediciones: Array, aBorrar: Array, bloqueados: Array, pendientes: Array}}
+ *   aBorrar = lote de esta sesion; pendientes = borrables que quedan para
+ *   las siguientes.
  */
-export function planificarDepuracion(seleccion) {
+export function planificarDepuracion(seleccion, limite = Infinity) {
   const seleccionados = new Set(seleccion.map(clave));
 
   // --- 1. Ediciones de grupo necesarias (grupos NO marcados) ---
-  // grupoKey -> { grupo, quitar: string[], miembros: string[] }
+  // grupoKey -> { grupo, quitar: string[], claves: string[], miembros: string[] }
   const ediciones = new Map();
 
   for (const objeto of seleccion) {
@@ -54,9 +63,10 @@ export function planificarDepuracion(seleccion) {
       if (seleccionados.has(claveGrupo(g))) continue; // se borra el grupo entero
       const gk = claveGrupo(g);
       if (!ediciones.has(gk)) {
-        ediciones.set(gk, { grupo: g, quitar: [], miembros: g.miembros || [] });
+        ediciones.set(gk, { grupo: g, quitar: [], claves: [], miembros: g.miembros || [] });
       }
       ediciones.get(gk).quitar.push(objeto.name);
+      ediciones.get(gk).claves.push(clave(objeto));
     }
   }
 
@@ -87,10 +97,73 @@ export function planificarDepuracion(seleccion) {
   }
 
   // --- 4. Orden de borrado por dependencias: contenedor antes que contenido ---
-  const aBorrar = ordenarPorDependencias(candidatos, new Set(candidatos.map(clave)));
+  const ordenados = ordenarPorDependencias(candidatos, new Set(candidatos.map(clave)));
 
-  return { ediciones: [...ediciones.values()], aBorrar, bloqueados };
+  // --- 5. Lote de la sesion: prefijo del orden seguro ---
+  // Los bloqueos se calcularon con la seleccion completa (paso 2), asi que
+  // un lote nunca deja vacio un grupo que la seleccion entera tambien
+  // vaciaria. Las ediciones se recortan a los objetos del lote.
+  const n = Number.isFinite(limite) && limite > 0 ? Math.floor(limite) : ordenados.length;
+  const aBorrar = ordenados.slice(0, n);
+  const pendientes = ordenados.slice(n);
+  const enLote = new Set(aBorrar.map(clave));
+
+  const edicionesLote = [];
+  for (const ed of ediciones.values()) {
+    const quitar = ed.quitar.filter((_, i) => enLote.has(ed.claves[i]));
+    if (!quitar.length) continue;
+    edicionesLote.push({
+      grupo: ed.grupo,
+      quitar,
+      miembros: ed.miembros,
+      restantes: ed.miembros.filter((m) => !quitar.includes(m)),
+    });
+  }
+
+  return { ediciones: edicionesLote, aBorrar, bloqueados, pendientes };
 }
+
+/**
+ * Refleja el resultado de una sesion sobre la lista de objetos sin uso de la
+ * ultima auditoria, para poder seguir con el siguiente lote sin volver a
+ * descargar la config: quita los eliminados, descuenta los grupos borrados
+ * y los miembros quitados de grupos que se conservan.
+ *
+ * @param {Array<object>} objetos  result.unusedObjects
+ * @param {{eliminadosClaves: string[], quitadosDeGrupos: Array<{grupo: string, nombres: string[]}>}} resultado
+ * @returns {Array<object>} lista nueva (los objetos que quedan se copian)
+ */
+export function aplicarResultadoDepuracion(objetos, resultado) {
+  const eliminados = new Set(resultado.eliminadosClaves || []);
+  const quitados = new Map((resultado.quitadosDeGrupos || []).map((q) => [q.grupo, q.nombres]));
+
+  return objetos
+    .filter((o) => !eliminados.has(clave(o)))
+    .map((o) => {
+      const grupos = (o.gruposContenedores || [])
+        .filter((g) => !eliminados.has(claveGrupo(g)))
+        .map((g) => {
+          const fuera = quitados.get(claveGrupo(g));
+          return fuera ? { ...g, miembros: (g.miembros || []).filter((m) => !fuera.includes(m)) } : g;
+        });
+
+      if (grupos.length === (o.gruposContenedores || []).length &&
+          grupos.every((g, i) => g === o.gruposContenedores[i])) {
+        return o;
+      }
+
+      const copia = { ...o, gruposContenedores: grupos, enGrupoSinUso: grupos.length > 0 };
+      if (!grupos.length && o.enGrupoSinUso) {
+        copia.motivo =
+          o.kind === "address-group" || o.kind === "service-group"
+            ? "Grupo sin referencias en politicas ni en el resto de la configuracion (su grupo contenedor ya se elimino)."
+            : "Sin referencias en politicas, grupos ni en el resto de la configuracion (su grupo ya se elimino).";
+      }
+      return copia;
+    });
+}
+
+export { clave as claveObjeto };
 
 /**
  * Ordena de forma que ningun objeto se borre antes que los grupos marcados
@@ -126,22 +199,41 @@ function ordenarPorDependencias(objetos, clavesEnLote) {
 /**
  * Ejecuta el plan: primero desvincula (PUT), despues borra (DELETE).
  *
- * @param {{target: object, seleccion: Array<object>}} config
+ * @param {{target: object, seleccion: Array<object>, limite?: number}} config
  * @param {(mensaje: string, nivel?: string) => void} log
  * @param {(hechos: number, total: number) => void} onProgreso
- * @returns {{eliminados, fallidos, omitidos, desvinculados}}
+ * @returns {{eliminados, fallidos, omitidos, desvinculados, pendientes,
+ *            eliminadosClaves: string[], quitadosDeGrupos: Array}}
  */
 export async function depurarObjetos(config, log, onProgreso) {
-  const { target, seleccion } = config;
+  const { target, seleccion, limite } = config;
 
   if (!seleccion?.length) {
     throw new Error("No se selecciono ningun objeto para depurar.");
   }
 
   const version = restVersionFromSw(target.swVersion);
-  const { ediciones, aBorrar, bloqueados } = planificarDepuracion(seleccion);
+  const { ediciones, aBorrar, bloqueados, pendientes } = planificarDepuracion(seleccion, limite);
+
+  // Detalle para que quien llama actualice su lista y el balance.
+  const eliminadosClaves = [];
+  const quitadosDeGrupos = [];
+  const resultado = (extra) => ({
+    omitidos: bloqueados.length,
+    pendientes: pendientes.length,
+    eliminadosClaves,
+    quitadosDeGrupos,
+    ...extra,
+  });
 
   log(`Depuracion: REST API ${version} en ${target.host}.`);
+  if (pendientes.length) {
+    log(
+      `Sesion limitada a ${aBorrar.length} borrado(s); ${pendientes.length} objeto(s) ` +
+        `quedan pendientes para la siguiente sesion.`,
+      "warn"
+    );
+  }
   log(
     "Los cambios quedan en la CANDIDATE config. NO se hara commit: " +
       "revisalos en la GUI y haz commit manualmente.",
@@ -159,7 +251,7 @@ export async function depurarObjetos(config, log, onProgreso) {
 
   if (!aBorrar.length) {
     log("No queda ningun objeto que se pueda eliminar con seguridad.", "warn");
-    return { eliminados: 0, fallidos: 0, omitidos: bloqueados.length, desvinculados: 0 };
+    return resultado({ eliminados: 0, fallidos: 0, desvinculados: 0 });
   }
 
   // El progreso cubre las dos fases: ediciones + borrados.
@@ -198,6 +290,7 @@ export async function depurarObjetos(config, log, onProgreso) {
         await actualizarObjeto(target, ref, grupoConMiembros(entry, g.kind, restantes));
         log(`${g.name}: ${ed.quitar.length} miembro(s) quitado(s), quedan ${restantes.length}.`, "ok");
         desvinculados += ed.quitar.length;
+        quitadosDeGrupos.push({ grupo: claveGrupo(g), nombres: [...ed.quitar] });
       }
     } catch (e) {
       fallidos++;
@@ -205,7 +298,7 @@ export async function depurarObjetos(config, log, onProgreso) {
       log(`${g.name}: ${e.message}`, "error");
       if (e.name === "OperacionCanceladaError") {
         log("Depuracion interrumpida: no se borro ningun objeto.", "warn");
-        return { eliminados: 0, fallidos, omitidos: bloqueados.length, desvinculados };
+        return resultado({ eliminados: 0, fallidos, desvinculados });
       }
     } finally {
       onProgreso(++hechos, totalPasos);
@@ -236,6 +329,7 @@ export async function depurarObjetos(config, log, onProgreso) {
       await eliminarObjeto(target, objeto);
       log(`${objeto.kind} '${objeto.name}' eliminado de la candidate config.`, "ok");
       eliminados++;
+      eliminadosClaves.push(clave(objeto));
     } catch (e) {
       fallidos++;
       log(`${objeto.name}: ${e.message}`, "error");
@@ -248,10 +342,11 @@ export async function depurarObjetos(config, log, onProgreso) {
   log(
     `Depuracion finalizada: ${eliminados} eliminado(s), ` +
       `${desvinculados} desvinculado(s) de grupos que se conservan, ` +
-      `${fallidos} con error, ${bloqueados.length} omitido(s). ` +
-      `REVISA y haz COMMIT manualmente en la GUI.`,
+      `${fallidos} con error, ${bloqueados.length} omitido(s)` +
+      (pendientes.length ? `, ${pendientes.length} pendiente(s) para la siguiente sesion` : "") +
+      `. REVISA y haz COMMIT manualmente en la GUI.`,
     eliminados ? "ok" : "warn"
   );
 
-  return { eliminados, fallidos, omitidos: bloqueados.length, desvinculados };
+  return resultado({ eliminados, fallidos, desvinculados });
 }

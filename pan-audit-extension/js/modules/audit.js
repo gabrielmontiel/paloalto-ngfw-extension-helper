@@ -1,6 +1,6 @@
 // js/modules/audit.js
 // Modulo: auditoria de configuracion (reglas deshabilitadas, objetos sin
-// uso, posibles sombras, buenas practicas).
+// uso, posibles sombras, buenas practicas, tags).
 //
 // SOLO LECTURA: trae la config (running o candidate) y la analiza en el
 // navegador. No hay ninguna llamada de escritura; el candado de panApi.js
@@ -37,7 +37,8 @@ export async function ejecutarAuditoria(target, source, log) {
     `Auditoria completa: ${s.totalRulesAudited} regla(s) en ${s.scopeCount} ambito(s). ` +
       `${s.disabledRuleCount} deshabilitada(s), ${s.unusedObjectCount} objeto(s) sin uso, ` +
       `${s.possiblyShadowedCount} posible(s) sombra(s), ` +
-      `${s.bestPracticeFindingCount} hallazgo(s) de buenas practicas.`,
+      `${s.bestPracticeFindingCount} hallazgo(s) de buenas practicas, ` +
+      `${s.unusedTagCount} tag(s) sin uso de ${s.tagCount}.`,
     "ok"
   );
 

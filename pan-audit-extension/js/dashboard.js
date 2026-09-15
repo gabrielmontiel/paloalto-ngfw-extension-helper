@@ -3,7 +3,13 @@
 // nuevo, este archivo es el unico que lo registra (mismo patron que el
 // app.js de PAN-helper v0.1).
 
-import { getTargets, TARGETS_KEY } from "./lib/store.js";
+import {
+  getTargets,
+  TARGETS_KEY,
+  getHistorialDepuracion,
+  agregarSesionDepuracion,
+  borrarHistorialDepuracion,
+} from "./lib/store.js";
 import { setApiLogger, cancelarTodo, sanearValorXpath } from "./lib/panApi.js";
 import { reglasDesdeCsv, aCsv, descargarTexto } from "./lib/util.js";
 import { ejecutarAuditoria } from "./modules/audit.js";
@@ -16,8 +22,21 @@ import {
   comandosSetReporte,
   clonarYAjustar,
 } from "./modules/hardening.js";
-import { depurarObjetos, planificarDepuracion } from "./modules/depuracion.js";
+import {
+  depurarObjetos,
+  planificarDepuracion,
+  aplicarResultadoDepuracion,
+  claveObjeto,
+} from "./modules/depuracion.js";
 import { ejecutarCertificados, ESTADOS } from "./modules/certificados.js";
+import {
+  procesarJsonBpa,
+  procesarScmBpa,
+  procesarLocalBpa,
+  descargarReporteHtml,
+  descargarReporteExcel,
+} from "./modules/bestpractices.js";
+import { setScmLogger, ORIGENES_SCM } from "./lib/scmApi.js";
 import {
   mapearTablaAGrid,
   dividirTabla,
@@ -51,6 +70,7 @@ function log(mensaje, nivel = "info") {
 
 // Cada llamada a la API de PAN-OS queda registrada aqui como linea "debug".
 setApiLogger(log);
+setScmLogger(log);
 
 $("btn-limpiar").addEventListener("click", () => {
   consola.textContent = "";
@@ -95,6 +115,12 @@ aplicarMenu(localStorage.getItem(MENU_KEY) === "1");
 //  Navegacion entre modulos
 // ---------------------------------------------------------------------------
 
+// Enlaces entre modulos (p. ej. de Auditoria a Best Practices).
+document.addEventListener("click", (e) => {
+  const destino = e.target.closest("[data-ir-modulo]")?.dataset.irModulo;
+  if (destino) document.querySelector(`.menu-item[data-modulo="${destino}"]`)?.click();
+});
+
 for (const boton of document.querySelectorAll(".menu-item")) {
   boton.addEventListener("click", () => {
     const destino = boton.dataset.modulo;
@@ -118,7 +144,7 @@ async function poblarTargets() {
   targetsCache = await getTargets();
 
   // Selects de auditoria y hardening (conservan la seleccion si sigue viva).
-  for (const selectId of ["a-target", "h-target"]) {
+  for (const selectId of ["a-target", "h-target", "bp-target"]) {
     const select = $(selectId);
     const previo = select.value;
     select.innerHTML = "";
@@ -226,6 +252,14 @@ $("h-target").addEventListener("change", ajustarFormularioHardening);
 let ultimaAuditoria = null;
 let ultimaConfigEl = null;
 let ultimaEtiqueta = "";
+let ultimoTargetId = null;
+
+// Balance de depuracion del equipo auditado. `conteo` arranca con la
+// auditoria y se descuenta con cada sesion; `ultimaSesion` guarda el antes /
+// despues de la sesion mas reciente y, si despues se recuenta desde la
+// candidate, el valor verificado contra el equipo.
+let conteo = null; // { targetId, fuente, totalObjetos }
+let ultimaSesion = null;
 
 const SEVERIDAD = { high: "alta", medium: "media", low: "baja", info: "info" };
 
@@ -237,6 +271,18 @@ $("a-btn").addEventListener("click", async () => {
   }
   const source = $("a-source").value;
 
+  // Al re-auditar el mismo equipo se conserva lo marcado en "Objetos sin
+  // uso": permite recontar entre lotes sin volver a seleccionar.
+  const marcadas =
+    ultimoTargetId === target.id
+      ? new Set(
+          [...document.querySelectorAll("#a-panel-unused .d-check:checked")]
+            .map((c) => objetosSinUso[Number(c.dataset.idx)])
+            .filter(Boolean)
+            .map(claveObjeto)
+        )
+      : new Set();
+
   $("a-btn").disabled = true;
   $("a-btn").textContent = "Auditando...";
   $("a-resultados").classList.add("oculto");
@@ -246,8 +292,26 @@ $("a-btn").addEventListener("click", async () => {
     ultimaAuditoria = result;
     ultimaConfigEl = configEl;
     ultimaEtiqueta = target.label || target.host;
+    ultimoTargetId = target.id;
 
-    renderAuditoria(result);
+    const s = result.summary;
+    if (ultimaSesion?.targetId !== target.id) {
+      ultimaSesion = null;
+    } else if (ultimaSesion.porVerificar && source === "candidate") {
+      ultimaSesion.verificado = { totalObjetos: s.totalObjectCount, sinUso: s.unusedObjectCount };
+      ultimaSesion.porVerificar = false;
+      const esperado = ultimaSesion.despues.totalObjetos;
+      log(
+        `Recuento en la candidate: ${s.totalObjectCount} objeto(s) ` +
+          (s.totalObjectCount === esperado
+            ? "— coincide con el balance de la sesion."
+            : `— el balance esperaba ${esperado}; la diferencia viene de cambios hechos fuera de esta sesion.`),
+        s.totalObjectCount === esperado ? "ok" : "warn"
+      );
+    }
+    conteo = { targetId: target.id, fuente: source, totalObjetos: s.totalObjectCount };
+
+    renderAuditoria(result, marcadas);
     $("a-export-json").disabled = false;
     $("a-export-csv").disabled = false;
     $("a-export-xml").disabled = false;
@@ -259,21 +323,10 @@ $("a-btn").addEventListener("click", async () => {
   }
 });
 
-export function renderAuditoria(result) {
+export function renderAuditoria(result, marcadas = new Set()) {
   $("a-resultados").classList.remove("oculto");
 
-  const s = result.summary;
-  const tarjetas = [
-    ["Reglas auditadas", s.totalRulesAudited],
-    ["Reglas deshabilitadas", s.disabledRuleCount],
-    ["Objetos sin uso", s.unusedObjectCount],
-    ["Objetos duplicados", s.duplicateObjectCount],
-    ["Posibles sombras", s.possiblyShadowedCount],
-    ["Buenas practicas", s.bestPracticeFindingCount],
-  ];
-  $("a-tarjetas").innerHTML = tarjetas
-    .map(([lbl, num]) => `<div class="tarjeta"><div class="num">${num}</div><div class="lbl">${escapeHtml(lbl)}</div></div>`)
-    .join("");
+  renderTarjetasAuditoria(result.summary);
 
   renderTabla(
     "a-panel-disabled",
@@ -282,8 +335,9 @@ export function renderAuditoria(result) {
     "No se encontraron reglas deshabilitadas."
   );
 
-  renderObjetosSinUso(result.unusedObjects);
+  renderObjetosSinUso(result.unusedObjects, marcadas);
   renderObjetosDuplicados(result.duplicateObjects);
+  renderTags(result.tags);
 
   renderTabla(
     "a-panel-shadowed",
@@ -309,6 +363,30 @@ export function renderAuditoria(result) {
     ]),
     "No se encontraron hallazgos de buenas practicas."
   );
+  // Vista rapida por regla; el assessment completo vive en su propio modulo.
+  $("a-panel-bestpractice").insertAdjacentHTML(
+    "afterbegin",
+    '<p class="nota nota-bpa">Vista rapida: cuatro controles sobre las reglas de security. ' +
+      "Para el assessment completo (perfiles, zonas, administracion, updates, certificados, " +
+      'HA; con HTML y Excel) usa <button type="button" class="secundario" data-ir-modulo="bestpractices">' +
+      "Best Practices</button>.</p>"
+  );
+}
+
+function renderTarjetasAuditoria(s) {
+  const tarjetas = [
+    ["Reglas auditadas", s.totalRulesAudited],
+    ["Objetos en la config", s.totalObjectCount],
+    ["Reglas deshabilitadas", s.disabledRuleCount],
+    ["Objetos sin uso", s.unusedObjectCount],
+    ["Objetos duplicados", s.duplicateObjectCount],
+    ["Posibles sombras", s.possiblyShadowedCount],
+    ["Buenas practicas", s.bestPracticeFindingCount],
+    ["Tags sin uso", `${s.unusedTagCount} / ${s.tagCount}`],
+  ];
+  $("a-tarjetas").innerHTML = tarjetas
+    .map(([lbl, num]) => `<div class="tarjeta"><div class="num">${num}</div><div class="lbl">${escapeHtml(lbl)}</div></div>`)
+    .join("");
 }
 
 // Pestana "Objetos sin uso": indice por tipo (chips clicables que llevan a
@@ -320,14 +398,33 @@ const ORDEN_SINUSO = ["address-group", "service-group", "address", "service"];
 // Objetos sin uso del ultimo analisis, en el mismo indice que los checkbox.
 let objetosSinUso = [];
 
-function renderObjetosSinUso(objetos) {
+// Maximo de borrados por sesion de "Depurar". Borrar cientos de objetos de
+// una vez puede tumbar el firewall (se ha visto con mas de ~200), asi que la
+// seleccion se procesa en lotes. Se recuerda entre usos.
+const LIMITE_KEY = "pan_helper_depuracion_limite";
+const LIMITE_POR_DEFECTO = 100;
+const LIMITE_AVISO = 200;
+
+function limiteGuardado() {
+  const v = parseInt(localStorage.getItem(LIMITE_KEY), 10);
+  return v > 0 ? v : LIMITE_POR_DEFECTO;
+}
+
+function limiteSesion() {
+  const v = parseInt($("d-limite")?.value, 10);
+  return v > 0 ? v : limiteGuardado();
+}
+
+function renderObjetosSinUso(objetos, marcadas = new Set()) {
   const panel = $("a-panel-unused");
   objetosSinUso = objetos;
 
   if (!objetos.length) {
     panel.innerHTML =
+      '<div id="d-balance"></div>' +
       '<div class="vacio">No se encontraron objetos address/service sin uso ' +
       "(nota: los grupos dinamicos por tag no se pueden verificar estaticamente).</div>";
+    pintarBalance();
     return;
   }
 
@@ -352,7 +449,8 @@ function renderObjetosSinUso(objetos) {
     const filas = lista
       .map(
         ({ o, i }) =>
-          `<tr><td><input type="checkbox" class="d-check" data-idx="${i}"></td>` +
+          `<tr><td><input type="checkbox" class="d-check" data-idx="${i}"` +
+          `${marcadas.has(claveObjeto(o)) ? " checked" : ""}></td>` +
           `<td>${escapeHtml(o.scope)}</td><td>${escapeHtml(o.name)}</td><td>` +
           (o.enGrupoSinUso ? '<span class="badge cascada">en grupo sin uso</span> ' : "") +
           `${escapeHtml(o.motivo)}</td></tr>`
@@ -370,6 +468,7 @@ function renderObjetosSinUso(objetos) {
   }
 
   panel.innerHTML =
+    '<div id="d-balance"></div>' +
     `<div class="indice-sinuso">${chips.join("")}</div>` +
     `<p class="nota-sinuso">Se evaluo el uso en todas las politicas (security, NAT, ` +
     `decrypt, QoS, PBF...), en los grupos y en el resto de la configuracion ` +
@@ -379,6 +478,9 @@ function renderObjetosSinUso(objetos) {
     `errores de referencia.</p>` +
     `<div class="acciones-sinuso">` +
     `<label class="check"><input type="checkbox" id="d-check-todo"> Seleccionar todo</label>` +
+    `<label class="campo-limite" title="Cuantos objetos se borran como maximo cada vez que pulsas Depurar. ` +
+    `Lo que exceda queda marcado para la siguiente sesion.">` +
+    `Max. borrados por sesion <input type="number" id="d-limite" min="1" step="1" value="${limiteGuardado()}"></label>` +
     `<span class="separador"></span>` +
     `<span id="d-seleccion" class="progreso"></span>` +
     `<span id="d-progreso" class="progreso"></span>` +
@@ -398,10 +500,14 @@ function renderObjetosSinUso(objetos) {
 
   const refrescar = () => {
     const marcados = checks.filter((c) => c.checked);
+    const limite = limiteSesion();
+    const lotes = Math.ceil(marcados.length / limite);
     $("d-seleccion").textContent = marcados.length
-      ? `${marcados.length} de ${checks.length} objeto(s) seleccionado(s)`
+      ? `${marcados.length} de ${checks.length} objeto(s) seleccionado(s)` +
+        (lotes > 1 ? ` — hasta ${limite} por sesion (~${lotes} sesiones)` : "")
       : "";
     $("d-btn-depurar").disabled = marcados.length === 0;
+    $("d-limite").classList.toggle("aviso", limite > LIMITE_AVISO);
 
     const todo = $("d-check-todo");
     todo.checked = marcados.length === checks.length;
@@ -430,19 +536,35 @@ function renderObjetosSinUso(objetos) {
     });
   }
 
+  $("d-limite").addEventListener("change", (e) => {
+    const v = parseInt(e.target.value, 10);
+    if (v > 0) localStorage.setItem(LIMITE_KEY, String(v));
+    else e.target.value = limiteGuardado();
+    refrescar();
+  });
+
   for (const c of checks) c.addEventListener("change", refrescar);
   $("d-btn-depurar").addEventListener("click", ejecutarDepuracion);
 
   refrescar();
+  pintarBalance();
 }
 
 // Borrado de los objetos marcados. Operacion destructiva: se planifica sin
 // tocar la red, se muestra exactamente que se va a borrar y que se va a
-// omitir, y solo se procede tras confirmacion explicita.
+// omitir, y solo se procede tras confirmacion explicita. Cada sesion borra
+// como maximo el limite configurado; lo que sobra queda marcado.
 async function ejecutarDepuracion() {
   const target = targetPorId($("a-target").value);
   if (!target) {
     log("No hay conexion seleccionada.", "error");
+    return;
+  }
+  if (target.id !== ultimoTargetId) {
+    log(
+      "La conexion seleccionada no es la del ultimo analisis. Audita ese equipo antes de depurar.",
+      "error"
+    );
     return;
   }
 
@@ -455,13 +577,25 @@ async function ejecutarDepuracion() {
     return;
   }
 
-  const { ediciones, aBorrar, bloqueados } = planificarDepuracion(seleccion);
+  const limite = limiteSesion();
+  const { ediciones, aBorrar, bloqueados, pendientes } = planificarDepuracion(seleccion, limite);
 
   const listado = aBorrar
     .slice(0, 15)
     .map((o) => `  - ${o.kind} '${o.name}' (${o.scope})`)
     .join("\n");
   const resto = aBorrar.length > 15 ? `\n  ...y ${aBorrar.length - 15} mas` : "";
+
+  const avisoLote = pendientes.length
+    ? `\n\nSESION LIMITADA a ${limite} borrado(s): quedan ${pendientes.length} objeto(s) ` +
+      `marcados para la(s) siguiente(s) sesion(es).`
+    : "";
+
+  const avisoLimite =
+    aBorrar.length > LIMITE_AVISO
+      ? `\n\nCUIDADO: vas a borrar ${aBorrar.length} objetos de una vez. Con mas de ` +
+        `${LIMITE_AVISO} se ha visto caer el firewall; considera bajar el maximo por sesion.`
+      : "";
 
   // Grupos que se conservan y a los que primero hay que quitarles miembros.
   const avisoEdiciones = ediciones.length
@@ -498,7 +632,7 @@ async function ejecutarDepuracion() {
 
   const confirmado = confirm(
     `ATENCION: se ELIMINARAN ${aBorrar.length} objeto(s) de la CANDIDATE config de ` +
-      `${target.host}:\n\n${listado}${resto}${avisoEdiciones}${avisoBloqueados}\n\n` +
+      `${target.host}:\n\n${listado}${resto}${avisoLote}${avisoLimite}${avisoEdiciones}${avisoBloqueados}\n\n` +
       `Los grupos marcados se borran antes que sus miembros para evitar errores de ` +
       `referencia.\n\n` +
       `NO se hara commit — es obligatorio que revises los cambios en la GUI del firewall ` +
@@ -513,22 +647,318 @@ async function ejecutarDepuracion() {
   const btn = $("d-btn-depurar");
   btn.disabled = true;
   btn.textContent = "Depurando...";
+  $("d-limite").disabled = true;
   $("d-progreso").textContent = "";
 
   try {
-    await depurarObjetos({ target, seleccion }, log, (hechos, total) => {
+    const antes = { totalObjetos: conteo.totalObjetos, sinUso: objetosSinUso.length };
+    const historial = await getHistorialDepuracion(target.id);
+
+    const r = await depurarObjetos({ target, seleccion, limite }, log, (hechos, total) => {
       $("d-progreso").textContent = `${hechos} / ${total}`;
     });
+
+    const restantes = aplicarResultadoDepuracion(objetosSinUso, r);
+    const despues = { totalObjetos: antes.totalObjetos - r.eliminados, sinUso: restantes.length };
+    const fecha = new Date().toISOString();
+
+    conteo.totalObjetos = despues.totalObjetos;
+    ultimaSesion = {
+      targetId: target.id,
+      fecha,
+      fuente: conteo.fuente,
+      antes,
+      despues,
+      eliminados: r.eliminados,
+      desvinculados: r.desvinculados,
+      fallidos: r.fallidos,
+      omitidos: r.omitidos,
+      pendientes: r.pendientes,
+      acumuladoAntes: historial.totalEliminados,
+      acumuladoDespues: historial.totalEliminados + r.eliminados,
+      porVerificar: r.eliminados > 0,
+      verificado: null,
+    };
+
+    if (r.eliminados || r.desvinculados || r.fallidos) {
+      await agregarSesionDepuracion(target.id, {
+        fecha,
+        fuente: conteo.fuente,
+        totalAntes: antes.totalObjetos,
+        totalDespues: despues.totalObjetos,
+        sinUsoAntes: antes.sinUso,
+        sinUsoDespues: despues.sinUso,
+        eliminados: r.eliminados,
+        desvinculados: r.desvinculados,
+        fallidos: r.fallidos,
+        omitidos: r.omitidos,
+        pendientes: r.pendientes,
+        limite,
+      });
+    }
+
     log(
-      "Vuelve a ejecutar la auditoria para ver la configuracion actualizada.",
+      `Balance: ${antes.totalObjetos} -> ${despues.totalObjetos} objeto(s) en la config, ` +
+        `${antes.sinUso} -> ${despues.sinUso} sin uso. Depurado en este equipo: ` +
+        `${ultimaSesion.acumuladoAntes} antes de la sesion, ${ultimaSesion.acumuladoDespues} despues.`,
+      "ok"
+    );
+
+    // La lista refleja lo borrado y conserva marcado lo pendiente, para
+    // seguir con el siguiente lote.
+    const eliminados = new Set(r.eliminadosClaves);
+    const marcadas = new Set(seleccion.map(claveObjeto).filter((k) => !eliminados.has(k)));
+    ultimaAuditoria.unusedObjects = restantes;
+    ultimaAuditoria.summary.unusedObjectCount = restantes.length;
+    ultimaAuditoria.summary.totalObjectCount = despues.totalObjetos;
+    renderTarjetasAuditoria(ultimaAuditoria.summary);
+    renderObjetosSinUso(restantes, marcadas);
+
+    log(
+      r.pendientes
+        ? `Quedan ${r.pendientes} objeto(s) marcados. Revisa el equipo y pulsa Depurar para el siguiente lote ` +
+            `(o "Recontar desde la candidate" para refrescar los datos antes).`
+        : "Pulsa \"Recontar desde la candidate\" para verificar el balance contra el equipo.",
       "warn"
     );
   } catch (e) {
     log(e.message, "error");
   } finally {
-    btn.disabled = false;
-    btn.textContent = "Depurar";
+    // Si la lista se volvio a pintar, estos elementos ya no estan en la pagina.
+    if (btn.isConnected) {
+      btn.disabled = false;
+      btn.textContent = "Depurar";
+      $("d-limite").disabled = false;
+    }
   }
+}
+
+// Balance de depuracion: cuanto se habia depurado en el equipo antes de la
+// sesion, cuanto despues, y como quedo la config (objetos totales y sin uso).
+// El historial vive en chrome.storage por equipo; los numeros de la sesion,
+// en memoria hasta la siguiente auditoria de otro equipo.
+async function pintarBalance() {
+  const cont = $("d-balance");
+  if (!cont || !conteo) return;
+
+  const targetId = conteo.targetId;
+  const historial = await getHistorialDepuracion(targetId);
+  if (!cont.isConnected || conteo?.targetId !== targetId) return;
+
+  const fmtFecha = (iso) =>
+    iso ? new Date(iso).toLocaleString("es-CO", { hour12: false }) : "—";
+  const item = (lbl, num, sub = "", clase = "") =>
+    `<div class="balance-item ${clase}"><div class="lbl">${escapeHtml(lbl)}</div>` +
+    `<div class="num">${num}</div>${sub ? `<div class="sub">${sub}</div>` : ""}</div>`;
+
+  const ses = ultimaSesion?.targetId === targetId ? ultimaSesion : null;
+  const items = [];
+
+  if (ses) {
+    items.push(
+      item("Depurado antes de la sesion", ses.acumuladoAntes, "acumulado en este equipo"),
+      item("Eliminados en la sesion", ses.eliminados,
+        [
+          ses.desvinculados ? `${ses.desvinculados} quitado(s) de grupos` : "",
+          ses.fallidos ? `${ses.fallidos} con error` : "",
+          ses.omitidos ? `${ses.omitidos} omitido(s)` : "",
+          ses.pendientes ? `${ses.pendientes} pendiente(s)` : "",
+        ].filter(Boolean).join(" · "), "principal"),
+      item("Depurado despues de la sesion", ses.acumuladoDespues,
+        `en ${historial.totalSesiones} sesion(es) desde ${fmtFecha(historial.desde)}`),
+      item("Objetos en la config", `${ses.antes.totalObjetos} &rarr; ${ses.despues.totalObjetos}`, "antes &rarr; despues"),
+      item("Objetos sin uso", `${ses.antes.sinUso} &rarr; ${ses.despues.sinUso}`, "antes &rarr; despues")
+    );
+  } else {
+    items.push(
+      item("Depurado antes (historial)", historial.totalEliminados,
+        historial.totalSesiones
+          ? `en ${historial.totalSesiones} sesion(es) desde ${fmtFecha(historial.desde)}`
+          : "sin sesiones registradas"),
+      item("Objetos en la config", conteo.totalObjetos, `${conteo.fuente} config`),
+      item("Objetos sin uso", objetosSinUso.length, "candidatos a depurar")
+    );
+  }
+
+  let nota = "";
+  if (ses?.verificado) {
+    const ok = ses.verificado.totalObjetos === ses.despues.totalObjetos;
+    nota =
+      `<p class="balance-nota ${ok ? "ok" : "warn"}">Verificado contra la candidate: ` +
+      `${ses.verificado.totalObjetos} objeto(s), ${ses.verificado.sinUso} sin uso` +
+      (ok ? " — coincide con el balance." : ` — el balance esperaba ${ses.despues.totalObjetos} (hubo cambios fuera de esta sesion).`) +
+      `</p>`;
+  } else if (ses?.porVerificar) {
+    nota =
+      '<p class="balance-nota">El "despues" se calcula con lo que respondio el equipo. ' +
+      'Para confirmarlo, recuenta desde la candidate config (los borrados no llegan a la running hasta el commit).</p>';
+  }
+
+  const filas = [...historial.sesiones]
+    .reverse()
+    .map(
+      (h) =>
+        `<tr><td>${escapeHtml(fmtFecha(h.fecha))}</td><td>${h.totalAntes} &rarr; ${h.totalDespues}</td>` +
+        `<td>${h.sinUsoAntes} &rarr; ${h.sinUsoDespues}</td><td>${h.eliminados}</td>` +
+        `<td>${h.desvinculados}</td><td>${h.fallidos}</td><td>${h.pendientes}</td><td>${h.limite ?? "—"}</td></tr>`
+    )
+    .join("");
+
+  const tablaHistorial = historial.sesiones.length
+    ? `<details class="balance-historial"><summary>Historial de sesiones (${historial.sesiones.length}` +
+      (historial.totalSesiones > historial.sesiones.length ? ` mas recientes de ${historial.totalSesiones}` : "") +
+      `)</summary><table><thead><tr><th>Fecha</th><th>Objetos</th><th>Sin uso</th><th>Eliminados</th>` +
+      `<th>Quitados de grupos</th><th>Errores</th><th>Pendientes</th><th>Limite</th></tr></thead>` +
+      `<tbody>${filas}</tbody></table></details>`
+    : "";
+
+  cont.innerHTML =
+    `<div class="balance-depuracion">` +
+    `<div class="balance-cabecera"><strong>Balance de depuracion</strong>` +
+    `<span class="separador"></span>` +
+    `<button type="button" id="d-btn-recontar" class="secundario" ` +
+    `title="Vuelve a auditar la candidate config de este equipo conservando lo marcado">Recontar desde la candidate</button>` +
+    (historial.totalSesiones
+      ? `<button type="button" id="d-btn-borrar-historial" class="secundario">Borrar historial</button>`
+      : "") +
+    `</div>` +
+    `<div class="balance-grid">${items.join("")}</div>` +
+    nota +
+    tablaHistorial +
+    `</div>`;
+
+  $("d-btn-recontar").addEventListener("click", () => {
+    if ($("a-target").value !== targetId) {
+      log("Selecciona otra vez la conexion auditada para recontar.", "error");
+      return;
+    }
+    $("a-source").value = "candidate";
+    $("a-btn").click();
+  });
+
+  $("d-btn-borrar-historial")?.addEventListener("click", async () => {
+    if (!confirm("¿Borrar el historial de depuracion de este equipo? No afecta al firewall.")) return;
+    await borrarHistorialDepuracion(targetId);
+    if (ultimaSesion?.targetId === targetId) ultimaSesion = null;
+    log("Historial de depuracion borrado para este equipo.");
+    pintarBalance();
+  });
+}
+
+// Pestana "Tags": solo lectura. Tags sin uso, referenciados sin definir,
+// duplicados e inventario con el uso de cada uno.
+function renderTags(tags) {
+  const panel = $("a-panel-tags");
+  if (!tags) {
+    panel.innerHTML = '<div class="vacio">Sin datos de tags.</div>';
+    return;
+  }
+
+  const { definidos, noDefinidos, duplicados, cobertura } = tags;
+  const sinUso = definidos.filter((t) => !t.enUso);
+  const pct = cobertura.reglasSecurity
+    ? Math.round((cobertura.reglasSecurityConTag / cobertura.reglasSecurity) * 100)
+    : 0;
+
+  const secciones = [
+    {
+      anchor: "tags-sinuso",
+      titulo: "Sin uso",
+      lista: sinUso,
+      vacio: "Todos los tags definidos se usan en algun lado.",
+      cabeceras: ["Ambito", "Tag", "Comentario"],
+      fila: (t) => [escapeHtml(t.scope), escapeHtml(t.name), escapeHtml(t.comments)],
+    },
+    {
+      anchor: "tags-nodefinidos",
+      titulo: "Referenciados sin definir",
+      lista: noDefinidos,
+      vacio: "No hay referencias a tags inexistentes.",
+      cabeceras: ["Tag", "Referencias", "Donde", "Nota"],
+      fila: (t) => [
+        escapeHtml(t.name),
+        String(t.referencias),
+        t.ejemplos.map(escapeHtml).join("<br>") +
+          (t.referencias > t.ejemplos.length ? `<br>...y ${t.referencias - t.ejemplos.length} mas` : ""),
+        t.soloEnFiltros
+          ? "Solo en filtros dinamicos: puede ser un tag registrado en runtime (User-ID, VM Information Sources)."
+          : "Usado en reglas u objetos sin un tag definido en su ambito o en uno superior.",
+      ],
+    },
+    {
+      anchor: "tags-duplicados",
+      titulo: "Duplicados",
+      lista: duplicados,
+      vacio: "No hay tags duplicados.",
+      cabeceras: ["Criterio", "Tag", "Definiciones (ambito — nombre — uso)"],
+      fila: (d) => [
+        d.criterio === "nombre" ? "mismo nombre en varios ambitos" : "solo difieren en mayusculas",
+        escapeHtml(d.clave),
+        d.ocurrencias
+          .map(
+            (o) =>
+              `${escapeHtml(o.scope)} — ${escapeHtml(o.name)} ` +
+              (o.enUso ? '<span class="badge uso">en uso</span>' : '<span class="badge sinuso">sin uso</span>')
+          )
+          .join("<br>"),
+      ],
+    },
+    {
+      anchor: "tags-inventario",
+      titulo: "Inventario",
+      lista: definidos,
+      vacio: "No hay tags definidos en la configuracion.",
+      cabeceras: ["Ambito", "Tag", "Reglas", "Objetos", "Filtros dinamicos", "Uso"],
+      fila: (t) => [
+        escapeHtml(t.scope),
+        escapeHtml(t.name),
+        String(t.reglas),
+        String(t.objetos),
+        String(t.filtrosDinamicos),
+        t.enUso
+          ? '<span class="badge uso">en uso</span>' +
+            (t.otrasReferencias.length
+              ? `<br><span class="nota-campo">fuera de politicas y objetos: ${t.otrasReferencias.map(escapeHtml).join("; ")}</span>`
+              : "")
+          : '<span class="badge sinuso">sin uso</span>',
+      ],
+    },
+  ];
+
+  const chips = secciones
+    .map(
+      (sec) =>
+        `<button type="button" class="chip" data-anchor="${sec.anchor}">` +
+        `${escapeHtml(sec.titulo)} <span class="cuenta">${sec.lista.length}</span></button>`
+    )
+    .join("");
+
+  const html = secciones
+    .map((sec) => {
+      const cuerpo = sec.lista.length
+        ? `<table><thead><tr>${sec.cabeceras.map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead>` +
+          `<tbody>${sec.lista.map((x) => `<tr>${sec.fila(x).map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>`
+        : `<div class="vacio">${escapeHtml(sec.vacio)}</div>`;
+      return `<h4 class="seccion-sinuso" id="${sec.anchor}">${escapeHtml(sec.titulo)} (${sec.lista.length})</h4>${cuerpo}`;
+    })
+    .join("");
+
+  panel.innerHTML =
+    `<div class="indice-sinuso">${chips}</div>` +
+    `<p class="nota-sinuso">Uso evaluado en reglas de todas las politicas (tag y group-tag), en ` +
+    `objetos address/service y sus grupos, en los filtros de address-groups dinamicos y, ` +
+    `como red de seguridad, en el resto de la configuracion. Cobertura: ` +
+    `<strong>${cobertura.reglasSecurityConTag} de ${cobertura.reglasSecurity}</strong> regla(s) de ` +
+    `security (${pct}%) llevan al menos un tag. Esta pestana es de solo lectura.</p>` +
+    html;
+
+  panel.querySelectorAll(".chip[data-anchor]").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      document
+        .getElementById(chip.dataset.anchor)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
 }
 
 // Pestana "Objetos duplicados": mismo patron de indice + secciones que
@@ -668,6 +1098,28 @@ $("a-export-csv").addEventListener("click", async () => {
         detalle: d.objetos
           .map((o) => `${o.scope} — ${o.name} [${o.enUso ? "en uso" : "sin uso"}]`)
           .join("; "),
+      });
+    }
+    const tags = ultimaAuditoria.tags;
+    for (const t of tags?.definidos.filter((x) => !x.enUso) || []) {
+      filas.push({ seccion: "tag_sin_uso", ambito: t.scope, rulebase: "tag", nombre: t.name, detalle: t.comments });
+    }
+    for (const t of tags?.noDefinidos || []) {
+      filas.push({
+        seccion: "tag_no_definido",
+        ambito: "",
+        rulebase: "tag",
+        nombre: t.name,
+        detalle: `${t.referencias} referencia(s): ${t.ejemplos.join("; ")}`,
+      });
+    }
+    for (const d of tags?.duplicados || []) {
+      filas.push({
+        seccion: "tag_duplicado",
+        ambito: d.criterio,
+        rulebase: "tag",
+        nombre: d.clave,
+        detalle: d.ocurrencias.map((o) => `${o.scope} — ${o.name}`).join("; "),
       });
     }
     for (const s of ultimaAuditoria.possiblyShadowedRules) {
@@ -1630,6 +2082,264 @@ function renderCertificados(filas, resumen, fallidos) {
     `<th>Estado</th><th>Dias</th><th>Equipo</th><th>Ambito</th>` +
     `<th>Certificado</th><th>Expira</th><th>Emisor</th>` +
     `</tr></thead><tbody>${cuerpo}</tbody></table></div>`;
+}
+
+// ---------------------------------------------------------------------------
+//  Modulo: best practices (BPA)
+// ---------------------------------------------------------------------------
+
+let ultimoBpa = null;
+
+const BADGE_SEV_BPA = { "Crítico": "high", "Advertencia": "medium", "Informativo": "low" };
+
+const valorRadio = (nombre) => document.querySelector(`input[name="${nombre}"]:checked`)?.value;
+
+let origenBpaAnterior = null;
+
+function ajustarFormularioBpa() {
+  const origen = valorRadio("bp-origen");
+  // Con JSON la configuracion es opcional y arranca en "No usar"; SCM y local
+  // la necesitan, asi que "No usar" vuelve a la conexion guardada.
+  if (origen !== origenBpaAnterior) {
+    if (origen === "json") document.querySelector('input[name="bp-fuente"][value="ninguna"]').checked = true;
+    else if (valorRadio("bp-fuente") === "ninguna") document.querySelector('input[name="bp-fuente"][value="conexion"]').checked = true;
+    origenBpaAnterior = origen;
+  }
+  const fuente = valorRadio("bp-fuente");
+  $("bp-campos-json").classList.toggle("oculto", origen !== "json");
+  $("bp-campos-scm").classList.toggle("oculto", origen !== "scm");
+  $("bp-fuente-ninguna").classList.toggle("oculto", origen !== "json");
+  $("bp-config-nota").classList.toggle("oculto", origen !== "json");
+  $("bp-config-legend").textContent = origen === "json"
+    ? "Configuracion del equipo (opcional)"
+    : "Configuracion a evaluar";
+  $("bp-fuente-conexion").classList.toggle("oculto", fuente !== "conexion");
+  $("bp-fuente-archivo").classList.toggle("oculto", fuente !== "archivo");
+  $("bp-btn").textContent = origen === "scm" ? "Generar BPA en SCM" : origen === "local" ? "Evaluar localmente" : "Generar reporte";
+}
+
+for (const radio of document.querySelectorAll('input[name="bp-origen"], input[name="bp-fuente"]')) {
+  radio.addEventListener("change", ajustarFormularioBpa);
+}
+ajustarFormularioBpa();
+
+/** Configuracion a evaluar (SCM y local). Devuelve un mensaje o null. */
+function errorFuenteConfig() {
+  if (valorRadio("bp-fuente") === "conexion" && !targetPorId($("bp-target").value)) return "Elige una conexion guardada.";
+  if (valorRadio("bp-fuente") === "archivo" && !$("bp-scm-xml").files[0]) return "Elige el running-config.xml.";
+  return null;
+}
+
+/** Validaciones del origen SCM que no necesitan red. Devuelve un mensaje o null. */
+function errorFormularioScm() {
+  if (!$("bp-acepto").checked) return "Confirma que la configuracion se enviara a Palo Alto Networks.";
+  if (!$("bp-client-id").value.trim() || !$("bp-client-secret").value) return "Escribe el Client ID y el Client Secret del service account de SCM.";
+  const fuente = errorFuenteConfig();
+  if (fuente) return fuente;
+  if (!$("bp-html").checked && !$("bp-excel").checked && !$("bp-guardar-json").checked) {
+    return "Marca al menos una salida (HTML, Excel o JSON); si no, el BPA se generaria para nada.";
+  }
+  return null;
+}
+
+$("form-bpa").addEventListener("submit", async (evento) => {
+  evento.preventDefault();
+  const origen = valorRadio("bp-origen");
+
+  if (origen === "scm") {
+    const error = errorFormularioScm();
+    if (error) {
+      log(error, "error");
+      return;
+    }
+    // Chrome exige el gesto del usuario vivo: el permiso se pide antes de
+    // cualquier otro await, o la peticion se rechaza.
+    let permiso = false;
+    try {
+      permiso = await chrome.permissions.request({ origins: ORIGENES_SCM });
+    } catch (e) {
+      log(`No se pudo solicitar el permiso de acceso a SCM: ${e.message}`, "error");
+      return;
+    }
+    if (!permiso) {
+      log("Permiso denegado: sin acceso a Strata Cloud Manager no se puede generar el BPA.", "error");
+      return;
+    }
+  } else if (origen === "local") {
+    const error = errorFuenteConfig() ||
+      (!$("bp-html").checked && !$("bp-excel").checked ? "Marca al menos una salida (HTML o Excel)." : null);
+    if (error) {
+      log(error, "error");
+      return;
+    }
+  } else if (!$("bp-json").files[0]) {
+    log("Elige el archivo JSON del BPA.", "error");
+    return;
+  } else if (valorRadio("bp-fuente") !== "ninguna") {
+    const error = errorFuenteConfig();
+    if (error) {
+      log(error, "error");
+      return;
+    }
+  }
+
+  const btn = $("bp-btn");
+  const textoBoton = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Generando...";
+  $("bp-resultado").innerHTML = "";
+  $("bp-progreso").textContent = "";
+  $("bp-btn-html").classList.add("oculto");
+  $("bp-btn-excel").classList.add("oculto");
+
+  const salidas = {
+    cliente: $("bp-cliente").value,
+    descargarHtml: $("bp-html").checked,
+    descargarExcel: $("bp-excel").checked,
+  };
+
+  try {
+    if (origen === "scm") {
+      ultimoBpa = await procesarScmBpa(
+        {
+          ...salidas,
+          fuente: valorRadio("bp-fuente"),
+          target: targetPorId($("bp-target").value),
+          archivoXml: $("bp-scm-xml").files[0],
+          tipoEquipo: $("bp-tipo").value,
+          modelo: $("bp-modelo").value,
+          clientId: $("bp-client-id").value,
+          clientSecret: $("bp-client-secret").value,
+          borrarAlTerminar: $("bp-borrar").checked,
+          guardarJson: $("bp-guardar-json").checked,
+        },
+        log,
+        (texto) => {
+          $("bp-progreso").textContent = `SCM ${texto}`;
+        }
+      );
+    } else if (origen === "local") {
+      ultimoBpa = await procesarLocalBpa(
+        { ...salidas, fuente: valorRadio("bp-fuente"), target: targetPorId($("bp-target").value), archivoXml: $("bp-scm-xml").files[0] },
+        log
+      );
+    } else {
+      ultimoBpa = await procesarJsonBpa(
+        {
+          ...salidas,
+          archivo: $("bp-json").files[0],
+          fuente: valorRadio("bp-fuente"),
+          target: targetPorId($("bp-target").value),
+          archivoXml: $("bp-scm-xml").files[0],
+        },
+        log
+      );
+    }
+    renderBpa(ultimoBpa.resumen);
+    $("bp-btn-html").classList.remove("oculto");
+    $("bp-btn-excel").classList.remove("oculto");
+  } catch (e) {
+    ultimoBpa = null;
+    log(e.message, "error");
+  } finally {
+    // El secret no se queda en la pagina mas alla de la ejecucion.
+    $("bp-client-secret").value = "";
+    $("bp-progreso").textContent = "";
+    btn.disabled = false;
+    btn.textContent = textoBoton;
+  }
+});
+
+$("bp-btn-html").addEventListener("click", async () => {
+  if (!ultimoBpa) return;
+  try {
+    await descargarReporteHtml(ultimoBpa, log);
+  } catch (e) {
+    log(e.message, "error");
+  }
+});
+
+$("bp-btn-excel").addEventListener("click", async () => {
+  if (!ultimoBpa) return;
+  const btn = $("bp-btn-excel");
+  btn.disabled = true;
+  try {
+    await descargarReporteExcel(ultimoBpa, log);
+  } catch (e) {
+    log(e.message, "error");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// Vista rapida en el dashboard; el detalle completo (cada check) va en el HTML.
+function renderBpa(resumen) {
+  const { kpis: k, dispositivo: d, categorias, hallazgos } = resumen;
+
+  const tarjeta = (num, lbl, clase = "") =>
+    `<div class="tarjeta ${clase}"><div class="num">${escapeHtml(num)}</div>` +
+    `<div class="lbl">${escapeHtml(lbl)}</div></div>`;
+
+  const tarjetas =
+    tarjeta(`${k.pctCumplimiento.toFixed(1)}%`, "Cumplimiento", "principal") +
+    tarjeta(k.cumple, "Cumple", "ok") +
+    tarjeta(k.falla, "Falla", "falla") +
+    tarjeta(k.noAplica, "No aplica") +
+    tarjeta(k.excluidos, "Excluidos") +
+    tarjeta(k.aplicables, "Aplicables");
+
+  const aviso = resumen.local
+    ? '<div class="aviso-certificado">Evaluacion local: checks propios de PAN Helper sobre la ' +
+      "configuracion. No sustituye al BPA oficial de Palo Alto.</div>"
+    : resumen.faltaAdoption
+    ? '<div class="aviso-certificado">El JSON no trae <code>adoption</code> / ' +
+      "<code>adoption_summary</code> (la API no siempre los devuelve). Los checks y " +
+      "este resumen no dependen de esas claves.</div>"
+    : "";
+
+  const barraPct = (pct) => {
+    const color = pct >= 80 ? "var(--ok)" : "var(--error)";
+    return `<div class="bp-pct"><div class="pista"><div class="relleno" ` +
+      `style="width:${pct.toFixed(1)}%;background:${color}"></div></div>` +
+      `<span class="valor" style="color:${color}">${pct.toFixed(1)}%</span></div>`;
+  };
+
+  const filasCat = categorias
+    .map(
+      (c) =>
+        `<tr><td>${escapeHtml(c.cat)}</td><td>${c.aplicables}</td><td>${c.cumple}</td>` +
+        `<td>${c.falla}</td><td>${barraPct(c.pct)}</td></tr>`
+    )
+    .join("");
+
+  const filasHallazgos = hallazgos
+    .map(
+      (h) =>
+        `<tr><td><span class="badge ${BADGE_SEV_BPA[h.sev] || "info"}">${escapeHtml(h.sev)}</span></td>` +
+        `<td>${escapeHtml(h.name)}</td><td>${escapeHtml(h.cat)}</td><td>${h.afectados}</td>` +
+        `<td>${escapeHtml(h.ubicaciones.join(", ") || "—")}</td></tr>`
+    )
+    .join("");
+
+  $("bp-resultado").innerHTML =
+    `<p class="nota" style="margin-top:16px;">${escapeHtml(d.tipo)}` +
+    (d.plataforma ? ` · ${escapeHtml(d.plataforma)}` : "") +
+    (d.version ? ` · PAN-OS ${escapeHtml(d.version)}` : "") +
+    (d.fecha ? ` · analisis ${escapeHtml(d.fecha)}` : "") +
+    `</p>` +
+    `<section class="tarjetas">${tarjetas}</section>` +
+    aviso +
+    `<h3 class="bp-titulo-tabla">Cumplimiento por categoria</h3>` +
+    (categorias.length
+      ? `<div class="panel"><table><thead><tr><th>Categoria</th><th>Aplicables</th>` +
+        `<th>Cumple</th><th>Falla</th><th>%</th></tr></thead><tbody>${filasCat}</tbody></table></div>`
+      : '<div class="vacio">Sin checks aplicables.</div>') +
+    `<h3 class="bp-titulo-tabla">Hallazgos — ${hallazgos.length} checks distintos en falla</h3>` +
+    (hallazgos.length
+      ? `<div class="panel"><table><thead><tr><th>Severidad</th><th>Check</th><th>Categoria</th>` +
+        `<th># Afectados</th><th>${escapeHtml(resumen.etiquetaUbicacion)}</th></tr></thead>` +
+        `<tbody>${filasHallazgos}</tbody></table></div>`
+      : '<div class="vacio">Ningun check en falla.</div>');
 }
 
 // ---------------------------------------------------------------------------
